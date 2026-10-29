@@ -1,0 +1,267 @@
+# shoalcheck — read-only auditor role.
+#
+# This ClusterRole grants EXACTLY the access the collector needs: get + list
+# (a one-time snapshot — no `watch`) on the 27 core kinds it reads
+# (PV/PVC expose volume size + StorageClass, never data) + named operator CRDs
+# (status/spec only) it reads.
+#
+# It deliberately does NOT include:
+#   - secrets            (secret values are never read)
+#   - configmaps         (ConfigMap data is never read)
+#   - pods/exec, pods/log, pods/attach, pods/portforward
+#   - persistentvolumeclaims/status or any PV/PVC subresource (object spec +
+#     capacity only — never the data a PV's CSI source might reference)
+#   - any create / update / patch / delete / deletecollection verb
+#   - CR analyzer reads touch only status/spec of named operator CRDs —
+#     never Secrets/ConfigMaps, never a Secret a CRD's spec might reference.
+#
+# Prometheus / mesh telemetry: server-aggregated PromQL reads (sum(rate(...)) by
+# (...)) over the Prometheus HTTP query API, never raw scrapes. Two ways in:
+#   - --prometheus-url <url>: out of band, to an endpoint the operator already
+#     trusts; nothing here is needed for it.
+#   - no flag: `shoalcheck audit` and the desktop app look for the cluster's own
+#     Prometheus and send the same GETs through the API server's service proxy
+#     (`get services/proxy`). THIS role does not grant that — it is rule A of the
+#     separate shoalcheck-app-connect role at the end of this file. Bound to this
+#     role alone, a reading falls back to declared figures and says so.
+# This role grants no access to mesh control planes, Envoy admin, or pod proxying.
+#
+# Apply it, then bind it to the user or ServiceAccount you want the audit to
+# run as (see the commented ClusterRoleBinding below), or generate a scoped
+# kubeconfig for a one-off run.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: shoalcheck-auditor
+  labels:
+    app.kubernetes.io/name: shoalcheck
+    app.kubernetes.io/component: auditor
+rules:
+  # core/v1
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+      - pods
+      - services
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+      - persistentvolumes          # storage capacity for cost summation (Phase 1)
+      - persistentvolumeclaims     # fallback capacity when a PV is unbound
+    verbs: ["get", "list"]
+  # apps/v1
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list"]
+  # policy/v1
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list"]
+  # rbac.authorization.k8s.io/v1 — bindings AND the Role/ClusterRole bodies they
+  # point at. The bodies were deliberately excluded until 2026-08-28; what changed
+  # is that nine CIS controls (5.1.2, 5.1.3, 5.1.4, 5.1.8–5.1.13) had no evidence
+  # without them, and "minimize access to secrets" is not a control anybody can act
+  # on when it cannot say WHICH secrets.
+  #
+  # WHAT A BODY IS: {verbs, apiGroups, resources, resourceNames, nonResourceURLs} —
+  # five string slices saying what MAY BE DONE. It is not object data: no Secret
+  # values, no ConfigMap data, no pod env. This role still grants none of those.
+  #
+  # STILL NOT GRANTED, and not by omission: escalate, bind, impersonate, and every
+  # write verb. Effective permissions are not computed from this — what a subject
+  # can actually do is the union over every binding naming it OR any group it is in,
+  # and group membership is decided by the authenticator, which no API read can see.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - clusterrolebindings
+      - rolebindings
+      - clusterroles
+      - roles
+    verbs: ["get", "list"]
+  # networking.k8s.io/v1
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - networkpolicies
+      - ingresses
+    verbs: ["get", "list"]
+  # autoscaling/v2
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list"]
+  # batch/v1 — CronJobs ONLY. status.lastSuccessfulTime is the only read-only signal that a
+  # scheduled job (a backup, a certificate rotation, a cleanup) has quietly stopped succeeding.
+  #
+  # JOBS ARE NOW GRANTED, BOUNDED, AND THE BOUND IS DISCLOSED — founder decision, 2026-08-29 (§10 Q2).
+  #
+  # This block used to say jobs were deliberately not granted, because every CronJob run spawns one. That
+  # reasoning was half right and the half it missed is the point: the CronJob controller ALREADY bounds its
+  # own jobs (successfulJobsHistoryLimit defaults to 3, failedJobsHistoryLimit to 1), so the volume risk is
+  # STANDALONE jobs nobody cleaned up — which is exactly the subject of the TTL finding. Granting only
+  # CronJob-owned ones is not expressible in RBAC and would have excluded the whole subject anyway.
+  #
+  # The read is capped in the collector and the truncation is recorded on the Inventory, so no rule can
+  # count a bounded list as if it were complete. Still no job logs, no pod exec, no secrets.
+  - apiGroups: ["batch"]
+    resources:
+      - cronjobs
+      - jobs
+    verbs: ["get", "list"]
+  # THE THREE CLASS OBJECTS — storage.k8s.io/StorageClass, networking.k8s.io/IngressClass and
+  # scheduling.k8s.io/PriorityClass.
+  #
+  # Each is NAMED by something the audit already reads and, until these were granted, only ever echoed
+  # back: a PVC's storageClassName was printed beside the words "the class object itself was not read",
+  # and a workload's priorityClassName and an Ingress's ingressClassName were not read at all. A name this
+  # product repeats without resolving is a name it cannot tell from a typo.
+  #
+  # All three are cluster-scoped policy objects and all three are small: a handful of StorageClasses,
+  # fewer IngressClasses, PriorityClasses in the low tens including the two Kubernetes ships. None carries
+  # workload data — a class names a provisioner, a controller or a value, never a payload.
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+    verbs: ["get", "list"]
+  # CustomResourceDefinitions — read for ONE reason: a CRD may declare a conversion webhook, and a
+  # conversion webhook whose backing Service publishes no ready endpoints is something the API server
+  # needs during an upgrade. Only four fields are kept (name, group, conversion strategy, the Service or
+  # URL behind it); a CRD's OpenAPI schema, validation rules and printer columns are read and discarded,
+  # never carried. No custom RESOURCES are read by this grant — the definitions only.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingressclasses
+    verbs: ["get", "list"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources:
+      - priorityclasses
+    verbs: ["get", "list"]
+  # discovery.k8s.io/v1 — which addresses a controller published as a Service's
+  # backends. This is the difference between "matches the selector" (intent) and
+  # "was listed as a backend" (fact); several rules previously had to print that
+  # difference as unknown. It carries no request data and no payload: an entry is
+  # an address, a targetRef and readiness conditions.
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list"]
+  # Stack-analyzer CRDs — status/spec reads only; no secrets, no configmaps.
+  # Opportunistic: each is listed ONLY when discovery shows the operator is
+  # installed (PresentGVRs gate), so an absent operator is never 404-listed.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "list"]
+  - apiGroups: ["security.istio.io"]
+    resources: ["peerauthentications", "authorizationpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.istio.io"]
+    resources: ["destinationrules"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy.linkerd.io"]
+    resources: ["servers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "list"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies", "ciliumclusterwidenetworkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["projectcalico.org"]
+    resources: ["globalnetworkpolicies", "networkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kafka.strimzi.io"]
+    resources: ["kafkas"]
+    verbs: ["get", "list"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["get", "list"]
+  # The monitoring stack — the one component that cannot audit itself.
+  # NOTE what is NOT here: Alertmanager's main configuration lives in a Secret
+  # (alertmanager-<name>) holding webhook URLs, API keys and integration tokens.
+  # It is not granted, and the analyzer says in its own findings that routing
+  # defined there is invisible to the audit.
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors", "podmonitors", "alertmanagerconfigs", "prometheuses"]
+    verbs: ["get", "list"]
+---
+# -----------------------------------------------------------------------------
+# OPT-IN: app auto-connect (terminal-free Prometheus). SEPARATE role on purpose.
+#
+# The desktop app and `shoalcheck audit` reach an in-cluster Prometheus with NO
+# pasted URL, using the SAME read-only kubeconfig creds they already hold (the CLI
+# uses the service proxy only, never the port-forward). Their normal path is the
+# USER's kubeconfig — NOT the deployed shoalcheck-auditor
+# ServiceAccount above — so these grants are deliberately NOT in shoalcheck-auditor:
+# the default auditor role stays a pure get/list snapshot (no services/proxy, no
+# pods/portforward). Bind THIS role only if you run the app/audit as a dedicated
+# ServiceAccount and want the auto-connect paths.
+#
+# Two mechanisms:
+#
+#   A — service-proxy (PREFERRED, PURE READ): PromQL queries are HTTP GET, so the
+#       only verb exercised is `get` on services/proxy. No create, no stream, no
+#       mutation — it stays inside the read-only trust posture.
+#
+#   B — port-forward (FALLBACK, OPT-IN, off by default; used only when the
+#       service-proxy is blocked). `create` on pods/portforward does NOT mutate
+#       the cluster — it opens a proxied stream to an EXISTING pod, the same
+#       primitive Lens/k9s use — but it is a non-read verb a reviewer will flag.
+#       It is opt-in in the app UI, disclosed in the report's data-source stamp,
+#       and isolated here so granting A never implies granting B.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: shoalcheck-app-connect
+  labels:
+    app.kubernetes.io/name: shoalcheck
+    app.kubernetes.io/component: app-connect
+rules:
+  # A — service-proxy (pure read). The Prometheus HTTP query API is reached via
+  # the API server's read-only Service proxy; only GET is issued.
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get"]
+  # B — port-forward fallback (opt-in). create on pods/portforward + the reads
+  # needed to find a Ready backing pod (EndpointSlices, then the pod).
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+---
+# Bind the role to whoever runs the audit. Uncomment and edit, then:
+#   kubectl apply -f deploy/rbac.yaml
+#
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata:
+#   name: shoalcheck-auditor
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: ClusterRole
+#   name: shoalcheck-auditor
+# subjects:
+#   - kind: User            # or ServiceAccount
+#     name: your-name@example.com
+#     apiGroup: rbac.authorization.k8s.io

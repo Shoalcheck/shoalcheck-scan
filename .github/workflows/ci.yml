@@ -1,0 +1,24 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      # The packages whose tests stand on their own, including the two that hold the read-only claims:
+      # internal/trace (the never-read guard, the request count) and internal/collect (the role). The rest
+      # test against fixtures that live in the Shoalcheck monorepo, and run in its CI.
+      - name: vet and test the standalone packages
+        run: |
+          PKGS="./cmd/... $(printf './internal/%s/... ' analyzers apiremoval buildinfo collect divergence envx headline kubeversions pricing progress prom redact refdata signing statedir trace)"
+          go vet $PKGS
+          go test $PKGS
