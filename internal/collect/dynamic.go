@@ -95,6 +95,11 @@ func (c *Collector) collectStack(ctx context.Context, inv *Inventory, step func(
 			if inv.StackObjects == nil {
 				inv.StackObjects = map[schema.GroupVersionResource][]unstructured.Unstructured{}
 			}
+			// Pruned as read, so no value field (Helm values, last-applied, managedFields) ever reaches the
+			// Inventory, a clone or a capture. See prune.go.
+			for i := range items {
+				items[i] = PruneCR(gvr.GroupResource(), &items[i])
+			}
 			inv.StackObjects[gvr] = append(inv.StackObjects[gvr], items...)
 			return nil
 		})

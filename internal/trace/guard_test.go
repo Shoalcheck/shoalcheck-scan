@@ -106,3 +106,49 @@ func TestGuard_RefusalNamesWhatItRefused(t *testing.T) {
 		t.Errorf("refusal %q carries an object or namespace name; it must name only the kind", err)
 	}
 }
+
+// A refusal is not a request — it is kept out of Total, which is checked against the API server's audit log —
+// but it is COUNTED, by kind, so a reading can say "refused by the never-read guard: 0" as a measurement
+// rather than say nothing. An uncounted zero and a counted one are different facts.
+func TestGuard_RefusalsAreCountedBesideTheTotalNotInIt(t *testing.T) {
+	srv, _ := guardServer(t)
+	rec := New(nil)
+	client := &http.Client{Transport: rec.Wrap(TargetAPIServer)(http.DefaultTransport)}
+	get := func(path string) {
+		resp, err := client.Get(srv.URL + path)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}
+
+	get("/api/v1/pods")
+	cursor := rec.Seq()
+	get("/api/v1/namespaces/prod/secrets")
+	get("/api/v1/namespaces/prod/secrets/db")
+	get("/api/v1/namespaces/prod/pods/api-0/log")
+	get("/api/v1/nodes")
+
+	all := rec.Tally()
+	if all.Total != 2 {
+		t.Errorf("Total = %d, want 2: refused requests were never issued", all.Total)
+	}
+	if all.Refused != 3 {
+		t.Errorf("Refused = %d, want 3", all.Refused)
+	}
+	if all.RefusedByKind["secrets"] != 2 || all.RefusedByKind["pods/log"] != 1 {
+		t.Errorf("RefusedByKind = %v, want secrets:2 pods/log:1", all.RefusedByKind)
+	}
+
+	win := rec.TallySince(cursor)
+	if win.Total != 1 || win.Refused != 3 {
+		t.Errorf("TallySince(cursor) = Total %d Refused %d, want 1 and 3: the window holds what happened after the cursor", win.Total, win.Refused)
+	}
+	if after := rec.TallySince(rec.Seq()); after.Refused != 0 {
+		t.Errorf("a window opened after the refusals counts %d of them", after.Refused)
+	}
+
+	all.RefusedByKind["secrets"] = 99
+	if rec.Tally().RefusedByKind["secrets"] != 2 {
+		t.Error("Tally().RefusedByKind aliases the recorder's map; Tally promises a copy")
+	}
+}

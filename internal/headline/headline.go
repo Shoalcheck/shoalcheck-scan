@@ -387,6 +387,11 @@ func traceLine(ar *types.AuditReport) string {
 		return "this reading recorded no session trace"
 	}
 	s := fmt.Sprintf("%d read%s · %d object write%s", st.Total, plural(st.Total), st.ObjectWrites, plural(st.ObjectWrites))
+	// The guard's count only when it refused something: on a clean run "0 refused by the guard" beside "0
+	// object writes" is noise on the one line a terminal reader takes in, and the reading states the zero.
+	if st.Refused != nil && *st.Refused > 0 {
+		s += fmt.Sprintf(" · %d refused by the never-read guard", *st.Refused)
+	}
 	if n := len(ar.Methodology.DeniedKinds); n > 0 {
 		s += fmt.Sprintf(" · %d list%s refused", n, plural(n))
 	}

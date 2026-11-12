@@ -1509,6 +1509,16 @@ func attachSessionTrace(ar *types.AuditReport, rec *trace.Recorder, since int64,
 		Denied: t.Denied, NoResponse: t.NoResponse, Retried: t.Retried,
 		ExecCredentialPlugin: execPlugin,
 	}
+	// The guard's count is always set on a measured run, zero included: a reading made with the guard says
+	// so, and one made before it (a nil here) does not pretend to.
+	refused := t.Refused
+	st.Refused = &refused
+	if len(t.RefusedByKind) > 0 {
+		st.RefusedKinds = make(map[string]int, len(t.RefusedByKind))
+		for k, v := range t.RefusedByKind {
+			st.RefusedKinds[k] = v
+		}
+	}
 	for _, g := range rec.GroupsSince(since) {
 		st.Rows = append(st.Rows, types.SessionTraceRow{
 			Verbs: g.Verbs, Resource: g.Resource, Scope: g.Scope,

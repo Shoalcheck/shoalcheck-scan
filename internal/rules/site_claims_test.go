@@ -35,18 +35,27 @@ func TestSiteFiguresMatchTheTree(t *testing.T) {
 	// THE NUMBER A READING SHOWS. The page said 87 — the rule registry — while every reading says "102 rules run",
 	// because a reading's rule set is the rules AND the stack analyzers (pipeline.RuleSetStamp). A visitor who
 	// opened the sample from the page read two different counts for one thing.
-	m := regexp.MustCompile(`<b>(\d+)</b><span>rules in every reading,`).FindStringSubmatch(src)
+	//
+	// SINCE 2026-11-11 THE TWO HALVES ARE STATED APART: `<b>89</b><span>detection rules and 15 stack analyzers
+	// in every reading`. "104 rules" counted the analyzers as rules, so each figure is now checked against its
+	// own registry, and their sum is still what a reading prints as "rules run".
+	m := regexp.MustCompile(`<b>(\d+)</b><span>detection rules and (\d+) stack analyzers in every reading`).FindStringSubmatch(src)
 	if m == nil {
 		t.Fatal("the landing page states no rule count, or the figure's markup changed — this test is now " +
 			"blind and would pass on any number at all")
 	}
-	stated, err := strconv.Atoi(m[1])
-	if err != nil {
-		t.Fatalf("rule figure %q is not a number", m[1])
-	}
-	if got := len(All()) + len(analyzers.All()); stated != got {
-		t.Errorf("the landing page says %d rules and a reading runs %d: the page a stranger reads first "+
-			"is making a claim this tree contradicts", stated, got)
+	for i, c := range []struct {
+		what string
+		want int
+	}{{"detection rules", len(All())}, {"stack analyzers", len(analyzers.All())}} {
+		stated, err := strconv.Atoi(m[i+1])
+		if err != nil {
+			t.Fatalf("%s figure %q is not a number", c.what, m[i+1])
+		}
+		if stated != c.want {
+			t.Errorf("the landing page says %d %s and this tree has %d: the page a stranger reads first "+
+				"is making a claim this tree contradicts", stated, c.what, c.want)
+		}
 	}
 }
 

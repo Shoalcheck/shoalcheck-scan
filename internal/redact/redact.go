@@ -298,6 +298,18 @@ func Report(ar *types.AuditReport) *types.AuditReport {
 		// An exec credential plugin is usually a well-known binary name, and is sometimes a path into the
 		// operator's own tooling.
 		nst.ExecCredentialPlugin = rep(st.ExecCredentialPlugin)
+		// The guard's kinds are resource names (secrets, pods/log), the same class as CollectedKinds: copied,
+		// not replaced. Copied rather than shared, so the redacted report never aliases the original's map.
+		if st.Refused != nil {
+			n := *st.Refused
+			nst.Refused = &n
+		}
+		if st.RefusedKinds != nil {
+			nst.RefusedKinds = make(map[string]int, len(st.RefusedKinds))
+			for k, v := range st.RefusedKinds {
+				nst.RefusedKinds[k] = v
+			}
+		}
 		out.Methodology.SessionTrace = &nst
 	}
 

@@ -888,6 +888,15 @@ type SessionTrace struct {
 	NoResponse int `json:"noResponse,omitempty"`
 	Retried    int `json:"retried,omitempty"`
 
+	// Refused is how many requests the never-read guard stopped before they were sent
+	// (internal/trace/guard.go): Secrets, ConfigMaps, pod logs, exec, attach, ServiceAccount tokens. It is
+	// outside Total, which counts what was issued. A POINTER because absence and zero are different facts:
+	// nil is a reading made before the guard existed (before 0.1.5) and must not read as "refused: 0", since
+	// the guard did not run there, which is not the same as refusing nothing. RefusedKinds names the kinds;
+	// they are resource names the published role already lists, not identifiers.
+	Refused      *int           `json:"refused,omitempty"`
+	RefusedKinds map[string]int `json:"refusedKinds,omitempty"`
+
 	// ExecCredentialPlugin names the kubeconfig's credential plugin when it has one. Those plugins are
 	// SEPARATE PROCESSES that contact a cloud identity provider, so their requests are not HTTP requests in
 	// this process and cannot be counted here at all. Naming the plugin is how the appendix scopes its own

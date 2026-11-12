@@ -35,6 +35,31 @@ Most packages test on their own here, including `internal/trace` and `internal/c
 fixtures that live in the Shoalcheck monorepo and run in its CI; [the workflow](.github/workflows/ci.yml)
 lists the ones that run here.
 
+## Releases: signed, and reproducible
+
+Each release of this repository carries the scanner for macOS, Linux and Windows (amd64 and arm64).
+- `checksums.txt` holds the SHA-256 of every file.
+- `checksums.txt.sigstore.json` is a cosign bundle over that file, made with the same key that signs Shoalcheck's
+  own releases: [cosign.pub](cosign.pub).
+
+Check a download:
+
+```sh
+cosign verify-blob --key cosign.pub --bundle checksums.txt.sigstore.json checksums.txt
+shasum -a 256 -c checksums.txt --ignore-missing
+```
+
+Rebuild it yourself and compare. The binaries are built from this repository's tagged commit as shown below, with
+the Go version in `go.mod`. No path, build id or git state goes into the binary, so a build from the same commit with
+the same Go version gives the same bytes in any directory, and its SHA-256 matches the line in `checksums.txt`.
+
+```sh
+git checkout v<version>
+CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -buildvcs=false -trimpath \
+  -ldflags "-s -w -buildid= -X github.com/Shoalcheck/shoalcheck-scan/internal/buildinfo.Version=<version>" -o shoalcheck-scan ./cmd/shoalcheck-scan
+shasum -a 256 shoalcheck-scan
+```
+
 ## What is not here
 
 The HTML report, history and comparisons, the CI gate, tickets, the desktop app and the MCP server are the

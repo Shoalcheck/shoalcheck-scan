@@ -57,6 +57,14 @@ type Tally struct {
 	// appendix can separate a retry from a distinct read.
 	Retried int
 
+	// Refused counts requests the never-read guard stopped before they were sent (see guard.go), and
+	// RefusedByKind names their kinds ("secrets", "pods/log"). Kept OUT of Total and every class line: a
+	// refused request was never issued, and Total is checked against the API server's audit log. Counted
+	// anyway, because a reading that says nothing about the guard cannot be told apart from one where the
+	// guard was never there.
+	Refused       int
+	RefusedByKind map[string]int
+
 	// ByTuple counts requests per RBAC unit. A copy; safe to mutate.
 	ByTuple map[string]int
 	// ByVerbTuple counts per (verb, tuple), which is the grouping the appendix prints.
@@ -95,6 +103,9 @@ type Recorder struct {
 	reqs    []Request
 	tally   Tally
 	pending map[string]bool // tuple+verb whose last attempt was throttled or failed
+	// refusals are the guard's, each stamped with the sequence number current when it happened, so a
+	// TallySince window holds the refusals of its own run and no other.
+	refusals []guardRefusal
 
 	seq     atomic.Int64
 	phase   atomic.Uint32
@@ -108,7 +119,7 @@ func New(sink Sink) *Recorder {
 	r := &Recorder{
 		pending: map[string]bool{},
 		sink:    sink,
-		tally:   Tally{ByTuple: map[string]int{}, ByVerbTuple: map[string]int{}, NoResponseByCluster: map[string]int{}},
+		tally:   Tally{ByTuple: map[string]int{}, ByVerbTuple: map[string]int{}, NoResponseByCluster: map[string]int{}, RefusedByKind: map[string]int{}},
 	}
 	r.cluster.Store("")
 	return r
@@ -199,6 +210,7 @@ func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		if req.Body != nil {
 			req.Body.Close()
 		}
+		t.rec.refuse(what)
 		return nil, fmt.Errorf("%w %s", ErrNeverRead, what)
 	}
 	start := time.Now()
@@ -308,7 +320,17 @@ func (r *Recorder) TallySince(cursor int64) Tally {
 	rows := append([]Request(nil), r.reqs...)
 	r.mu.Unlock()
 
-	t := Tally{ByTuple: map[string]int{}, ByVerbTuple: map[string]int{}, NoResponseByCluster: map[string]int{}}
+	t := Tally{ByTuple: map[string]int{}, ByVerbTuple: map[string]int{}, NoResponseByCluster: map[string]int{}, RefusedByKind: map[string]int{}}
+	r.mu.Lock()
+	for _, f := range r.refusals {
+		// >= rather than >: a refusal stamped with the cursor's own number happened after the request that
+		// number belongs to, which is the moment the window opened.
+		if f.after >= cursor {
+			t.Refused++
+			t.RefusedByKind[f.kind]++
+		}
+	}
+	r.mu.Unlock()
 	for _, q := range rows {
 		if q.Seq <= cursor {
 			continue
@@ -384,6 +406,10 @@ func (r *Recorder) Tally() Tally {
 	t.ByVerbTuple = make(map[string]int, len(r.tally.ByVerbTuple))
 	for k, v := range r.tally.ByVerbTuple {
 		t.ByVerbTuple[k] = v
+	}
+	t.RefusedByKind = make(map[string]int, len(r.tally.RefusedByKind))
+	for k, v := range r.tally.RefusedByKind {
+		t.RefusedByKind[k] = v
 	}
 	// Copied like the others: Tally documents itself as returning a copy safe to mutate, and a map shared
 	// with the live tally would break that promise silently.

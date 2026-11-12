@@ -202,6 +202,7 @@ var survivesRedaction = map[string]string{
 	"Methodology.SessionTrace.Rows.Paths":        "whitelisted DISCOVERY routes — /apis, /version",
 	"Methodology.SessionTrace.Rows.Ref":          "a position in this document — \"T-04\"",
 	"Methodology.SessionTrace.Rows.ConsumedBy":   "rule identifiers this product mints",
+	"Methodology.SessionTrace.RefusedKinds.KEY":  "a kind from the never-read guard's fixed list (internal/trace/guard.go): secrets, configmaps, pods/log, pods/exec, pods/attach, serviceaccounts/token",
 	"Trend.ReferenceDataChanged":                 "dataset names from our own registry",
 
 	// ── never serialized at all ──────────────────────────────────────────────────────────────

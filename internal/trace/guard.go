@@ -18,8 +18,9 @@ import (
 // Suggested by an engineer we asked for an opinion (2026-10-29): wrap the client so Secrets cannot be read,
 // and publish that code as evidence. This package is in the Apache-2.0 subset, so the evidence is the code.
 //
-// A refused request was never issued, so it is NOT recorded: the tally is checked against the API
-// server's own audit log, and a row the server never saw would make them disagree.
+// A refused request was never issued, so it is NOT recorded as a request: the tally is checked against the
+// API server's own audit log, and a row the server never saw would make them disagree. It is counted beside
+// the total instead (Tally.Refused), so a reading can state the guard's count as a measurement.
 var ErrNeverRead = errors.New("refused before it left the process: this binary never reads")
 
 // neverRead are the kinds whose contents are the credential, the connection string or the customer data
@@ -76,4 +77,20 @@ func refusal(target Target, u *url.URL) string {
 		return rest[0] + "/" + rest[2]
 	}
 	return ""
+}
+
+type guardRefusal struct {
+	after int64 // the recorder's sequence number when the refusal happened
+	kind  string
+}
+
+func (r *Recorder) refuse(kind string) {
+	r.mu.Lock()
+	r.refusals = append(r.refusals, guardRefusal{after: r.seq.Load(), kind: kind})
+	r.tally.Refused++
+	if r.tally.RefusedByKind == nil {
+		r.tally.RefusedByKind = map[string]int{}
+	}
+	r.tally.RefusedByKind[kind]++
+	r.mu.Unlock()
 }

@@ -193,8 +193,5 @@ func printPermissions(w io.Writer) {
 		fmt.Fprintf(w, "  %-26s %-26s %s\n", group, ra.Resource, strings.Join(ra.Verbs, ","))
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Never read: Secret values, ConfigMap data, logs, exec. Pod environment values arrive")
-	fmt.Fprintln(w, "inside pod specs and are dropped on arrival; only variable names are kept.")
-	fmt.Fprintln(w, "Never written: no create/update/patch/delete, no watch.")
-	fmt.Fprintln(w, "Apply the matching ClusterRole from deploy/rbac.yaml.")
+	collect.WriteNeverAndRecipe(w, "shoalcheck-scan --output report.json")
 }
