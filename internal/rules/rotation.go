@@ -426,6 +426,7 @@ func (r ServiceNoReadyEndpoints) Evaluate(inv *collect.Inventory, opts Options) 
 		evidence = append(evidence, coverage)
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("endpoints.slices", pub.slices), types.NewFact("endpoints.published", pub.total), types.NewFact("endpoints.ready.false", pub.readyFalse), types.NewFact("endpoints.ready.unset", pub.readyUnset), types.NewFact("endpoints.terminating", pub.terminating)},
 			ID:          findingID(r.ID(), "Service", svc.Namespace, svc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Service", Namespace: svc.Namespace, Name: svc.Name},
 			RuleID:      r.ID(),
@@ -540,6 +541,7 @@ func (r ServiceEndpointsOneNode) Evaluate(inv *collect.Inventory, opts Options) 
 			coverage,
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("endpoints.ready", pub.ready), types.NewFact("endpoints.node", h.node)},
 			ID:          findingID(r.ID(), "Service", svc.Namespace, svc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Service", Namespace: svc.Namespace, Name: svc.Name},
 			RuleID:      r.ID(),
@@ -692,6 +694,7 @@ func (r PodSelectedButUnpublished) Evaluate(inv *collect.Inventory, opts Options
 			coverage,
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("endpoints.selected", h.selected), types.NewFact("endpoints.unpublished", len(names))},
 			ID:          findingID(r.ID(), "Service", svc.Namespace, svc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Service", Namespace: svc.Namespace, Name: svc.Name},
 			RuleID:      r.ID(),

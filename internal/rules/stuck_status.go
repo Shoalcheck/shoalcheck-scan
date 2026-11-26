@@ -194,7 +194,7 @@ func (r StuckCondition) Evaluate(inv *collect.Inventory, opts Options) []types.F
 		}
 	}
 	if observed(inv, "pods") {
-		owners := newOwnerIndex(inv) // one lookup per pod, not a walk of every Deployment per pod
+		owners := derived(inv, opts).ownerIndex() // one lookup per pod, not a walk of every Deployment per pod
 		for i := range inv.Pods {
 			p := &inv.Pods[i]
 			if !opts.IncludeSystem && isSystemNamespace(p.Namespace) {
@@ -356,6 +356,7 @@ func (r StuckCondition) Evaluate(inv *collect.Inventory, opts Options) []types.F
 		}
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("condition.type", first.condType), types.NewFact("condition.status", string(first.status)), types.NewFact("condition.since", oldest.UTC().Format(time.RFC3339)), types.NewFact("condition.objects", len(b.items))},
 			ID:          findingID(r.ID(), b.kind, b.ns, b.label+"/"+first.condType),
 			IDBasis:     &types.ResourceRef{Kind: b.kind, Namespace: b.ns, Name: b.label + "/" + first.condType},
 			RuleID:      r.ID(),
@@ -451,6 +452,7 @@ func (r DaemonSetMisscheduled) Evaluate(inv *collect.Inventory, opts Options) []
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("daemonset.misscheduled", n), types.NewFact("daemonset.desired", ds.Status.DesiredNumberScheduled), types.NewFact("daemonset.ready", ds.Status.NumberReady)},
 			ID:          findingID(r.ID(), "DaemonSet", ds.Namespace, ds.Name),
 			IDBasis:     &types.ResourceRef{Kind: "DaemonSet", Namespace: ds.Namespace, Name: ds.Name},
 			RuleID:      r.ID(),
@@ -550,6 +552,7 @@ func (r VolumeExpansionIncomplete) Evaluate(inv *collect.Inventory, opts Options
 			"reading; the two numbers disagreeing is what it shows")
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("pvc.requested", want.Value()), types.NewFact("pvc.capacity", got.Value())},
 			ID:          findingID(r.ID(), "PersistentVolumeClaim", pvc.Namespace, pvc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name},
 			RuleID:      r.ID(),

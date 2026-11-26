@@ -163,6 +163,7 @@ func (a ServiceMonitorTargets) Analyze(inv *collect.Inventory) []types.Finding {
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("monitor.candidates", candidates), types.NewFact("monitor.matched", matched)},
 			ID:          findingID("stack.monitoring.servicemonitor-selects-nothing", "ServiceMonitor", ns, name),
 			IDBasis:     &types.ResourceRef{Kind: "ServiceMonitor", Namespace: ns, Name: name},
 			RuleID:      "stack.monitoring.servicemonitor-selects-nothing",
@@ -251,6 +252,7 @@ func (a PodMonitorTargets) Analyze(inv *collect.Inventory) []types.Finding {
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("monitor.candidates", candidates), types.NewFact("monitor.matched", matched)},
 			ID:          findingID("stack.monitoring.podmonitor-selects-nothing", "PodMonitor", ns, name),
 			IDBasis:     &types.ResourceRef{Kind: "PodMonitor", Namespace: ns, Name: name},
 			RuleID:      "stack.monitoring.podmonitor-selects-nothing",
@@ -343,6 +345,7 @@ func (a AlertRouting) Analyze(inv *collect.Inventory) []types.Finding {
 			declaredText = "none"
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("alertroute.receivers.missing", len(missing)), types.NewFact("alertroute.receivers.declared", len(names))},
 			ID:          findingID("stack.monitoring.alert-route-receiver-missing", "AlertmanagerConfig", ns, name),
 			IDBasis:     &types.ResourceRef{Kind: "AlertmanagerConfig", Namespace: ns, Name: name},
 			RuleID:      "stack.monitoring.alert-route-receiver-missing",
@@ -432,6 +435,7 @@ func (a PrometheusDurability) Analyze(inv *collect.Inventory) []types.Finding {
 			retentionText = fmt.Sprintf("spec.retention is %q", retention)
 		}
 		out = append(out, types.Finding{
+			Facts:       prometheusFacts(retention),
 			ID:          findingID("stack.monitoring.prometheus-storage-ephemeral", "Prometheus", ns, name),
 			IDBasis:     &types.ResourceRef{Kind: "Prometheus", Namespace: ns, Name: name},
 			RuleID:      "stack.monitoring.prometheus-storage-ephemeral",
@@ -461,4 +465,12 @@ func (a PrometheusDurability) Analyze(inv *collect.Inventory) []types.Finding {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// prometheusFacts is the ephemeral-storage finding's value: the retention the object writes, when it writes one.
+func prometheusFacts(retention string) []types.Fact {
+	if retention == "" {
+		return nil
+	}
+	return []types.Fact{types.NewFact("prometheus.retention", retention)}
 }

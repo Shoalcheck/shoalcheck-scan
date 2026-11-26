@@ -112,6 +112,7 @@ func (r NoResourceGovernance) Evaluate(inv *collect.Inventory, opts Options) []t
 		evidence = append(evidence, "admission/policy-engine-injected defaults (Kyverno, OPA, mutating webhooks) are not observable in a read-only scan and may already govern this namespace")
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("ns.workloads", workloadCount[ns]), types.NewFact("ns.quotas", quotaCount[ns]), types.NewFact("ns.limitranges", lrCount[ns]), types.NewFact("ns.containers.unrequested", len(noReq))},
 			ID:          findingID(r.ID(), "Namespace", "", ns),
 			IDBasis:     &types.ResourceRef{Kind: "Namespace", Namespace: "", Name: ns},
 			RuleID:      r.ID(),

@@ -53,7 +53,8 @@ type NodeHeadroom struct{}
 func (NodeHeadroom) ID() string { return "k8s.cost.node-headroom" }
 
 // 1.1.0 (2026-10-21): a finished pod's requests no longer count as reserved (holdsRoom).
-func (NodeHeadroom) Version() string { return "1.1.0" }
+// 1.2.0 (2026-11-16): a pod's runtime overhead counts in its requests, as the scheduler counts it (ENG-16).
+func (NodeHeadroom) Version() string { return "1.2.0" }
 
 // pool aggregates the nodes of one instance type + capacity type and their
 // request load. Keying on capacity (not instance-type alone) keeps this seam's
@@ -265,7 +266,16 @@ func (r NodeHeadroom) Evaluate(inv *collect.Inventory, opts Options) []types.Fin
 				"SYSTEM/addon pool (kubernetes.azure.com/mode=system): keep at least 2 nodes for control-plane addon HA (CoreDNS, metrics-server, konnectivity) — never drain to 1 even if slack exists.")
 		}
 
+		facts := []types.Fact{types.NewFact("pool.instance-type", name), types.NewFact("pool.region", p.region),
+			types.NewFact("pool.capacity", string(p.capacity)), types.NewFact("pool.nodes", nodeCount),
+			types.NewFact("headroom.removable", removable),
+			types.NewFact("headroom.requests.cpu", p.reqCPU.MilliValue()), types.NewFact("headroom.requests.memory", p.reqMem.Value()),
+			types.NewFact("headroom.allocatable.cpu", p.allocCPU.MilliValue()), types.NewFact("headroom.allocatable.memory", p.allocMem.Value())}
+		if priceOK {
+			facts = append(facts, types.NewFact("pool.list.node", monthly))
+		}
 		out = append(out, types.Finding{
+			Facts:       facts,
 			ID:          findingID(r.ID(), "NodePool", p.region, idName),
 			IDBasis:     &types.ResourceRef{Kind: "NodePool", Namespace: p.region, Name: idName},
 			RuleID:      r.ID(),
@@ -359,6 +369,14 @@ func podRequests(p corev1.Pod) (cpu, mem resource.Quantity) {
 		if m, ok := req[corev1.ResourceMemory]; ok {
 			mem.Add(m)
 		}
+	}
+	// THE RUNTIME'S OWN COST (ENG-16). A RuntimeClass with an overhead (Kata, gVisor) adds it to the pod, and the
+	// scheduler fits the pod with it: a walker without it found room the scheduler would not.
+	if q, ok := p.Spec.Overhead[corev1.ResourceCPU]; ok {
+		cpu.Add(q)
+	}
+	if q, ok := p.Spec.Overhead[corev1.ResourceMemory]; ok {
+		mem.Add(q)
 	}
 	return cpu, mem
 }

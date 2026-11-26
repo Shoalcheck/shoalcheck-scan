@@ -251,6 +251,7 @@ func (r RolloutDoesNotSelfRoll) Evaluate(inv *collect.Inventory, opts Options) [
 			}
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("replicas.desired", replicas), types.NewFact("rollout.updated", s.Status.UpdatedReplicas)},
 			ID:          findingID(r.ID(), "StatefulSet", s.Namespace, s.Name),
 			IDBasis:     &types.ResourceRef{Kind: "StatefulSet", Namespace: s.Namespace, Name: s.Name},
 			RuleID:      r.ID(),
@@ -377,6 +378,7 @@ func (r RolloutNeedsSurgeCapacity) Evaluate(inv *collect.Inventory, opts Options
 		}
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("replicas.desired", replicas), types.NewFact("surge.pods", maxSurge), types.NewFact("surge.ask.cpu", needCPU.MilliValue()), types.NewFact("surge.ask.memory", needMem.Value()), types.NewFact("surge.free.cpu", cap.freeCPU.MilliValue()), types.NewFact("surge.free.memory", cap.freeMem.Value()), types.NewFact("surge.nodes", cap.eligibleNodes)},
 			ID:          findingID(r.ID(), "Deployment", d.Namespace, d.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Deployment", Namespace: d.Namespace, Name: d.Name},
 			RuleID:      r.ID(),
@@ -648,6 +650,7 @@ func (r RolloutContradictsDeclaredMinimum) Evaluate(inv *collect.Inventory, opts
 						"which is the set the controller counts", st.ExpectedPods, replicas))
 			}
 			out = append(out, types.Finding{
+				Facts:       []types.Fact{types.NewFact("rollout.max-unavailable", maxUnavailable), types.NewFact("drain.pods.expected", st.ExpectedPods), types.NewFact("pdb.pods.desired", st.DesiredHealthy), types.NewFact("rollout.available", remaining)},
 				ID:          findingID(r.ID(), "Deployment", d.Namespace, d.Name+"|"+pdb.Name),
 				IDBasis:     &types.ResourceRef{Kind: "Deployment", Namespace: d.Namespace, Name: d.Name + "|" + pdb.Name},
 				RuleID:      r.ID(),
@@ -781,6 +784,7 @@ func (r StatefulSetPartitionLeftBehind) Evaluate(inv *collect.Inventory, opts Op
 			sev = types.SeverityLow
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("replicas.desired", replicas), types.NewFact("rollout.partition", partition), types.NewFact("rollout.held-back", heldBack), types.NewFact("rollout.updated", s.Status.UpdatedReplicas)},
 			ID:          findingID(r.ID(), "StatefulSet", s.Namespace, s.Name),
 			IDBasis:     &types.ResourceRef{Kind: "StatefulSet", Namespace: s.Namespace, Name: s.Name},
 			RuleID:      r.ID(),

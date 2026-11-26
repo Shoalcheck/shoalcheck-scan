@@ -58,10 +58,12 @@ func (r VersionPastStandardSupport) Evaluate(inv *collect.Inventory, opts Option
 	var dollar float64
 	var basis types.PriceBasis
 	var priceNote string
+	var surcharge []types.Fact
 	switch {
 	case status == kubeversions.StatusExtended:
 		if hourly, ok := opts.prices().ExtendedSupportHourly(provider); ok {
 			dollar = hourly * versionHoursPerMonth
+			surcharge = []types.Fact{types.NewFact("version.surcharge.hourly", hourly), types.NewFact("version.surcharge", dollar)}
 			basis = types.PricePriced
 			priceNote = fmt.Sprintf(
 				"%s bills $%.4f per cluster-hour on top of the ordinary control-plane rate while a version is "+
@@ -109,7 +111,17 @@ func (r VersionPastStandardSupport) Evaluate(inv *collect.Inventory, opts Option
 		sev = types.SeverityHigh
 	}
 
+	facts := []types.Fact{types.NewFact("version.provider", provider), types.NewFact("version.minor", minor),
+		types.NewFact("version.status", string(status)), types.NewFact("version.standard-ends", window.StandardEnds)}
+	if window.Released != "" {
+		facts = append(facts, types.NewFact("version.released", window.Released))
+	}
+	if window.ExtendedEnds != "" {
+		facts = append(facts, types.NewFact("version.extended-ends", window.ExtendedEnds))
+	}
+	facts = append(facts, surcharge...)
 	return []types.Finding{{
+		Facts:               facts,
 		ID:                  findingID(r.ID(), "Cluster", "", minor),
 		IDBasis:             &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: minor},
 		RuleID:              r.ID(),

@@ -251,6 +251,7 @@ func (r PrivilegedHostAccess) Evaluate(inv *collect.Inventory, opts Options) []t
 		// Node-infrastructure down-rank: CNI/CSI/node-exporter/etc legitimately
 		// need this access. Tag it as expected and cap severity so a normal prod
 		// cluster doesn't drown in High findings for correctly-configured agents.
+		items := len(evidence)
 		infra := infraSignal(w)
 		severity := tierSeverity(tier)
 		confidence := 1.0 // presence of the field is certain; see comment below.
@@ -269,6 +270,7 @@ func (r PrivilegedHostAccess) Evaluate(inv *collect.Inventory, opts Options) []t
 		}
 
 		out = append(out, types.Finding{
+			Facts:              []types.Fact{types.NewFact("host-access.items", items), types.NewFact("host-access.node-infrastructure", infra != "")},
 			ID:                 findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:            &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:             r.ID(),

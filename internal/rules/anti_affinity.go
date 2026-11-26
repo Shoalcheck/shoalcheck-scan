@@ -45,7 +45,7 @@ func (r NoAntiAffinity) Evaluate(inv *collect.Inventory, opts Options) []types.F
 	// denial guard: only trust a zero/low count when nodes were actually
 	// collected. If "nodes" is absent from Meta.Collected, treat topology as
 	// unknown (nodesObserved=false) rather than asserting a single-node cluster.
-	nodesObserved := aaNodesCollected(inv, "nodes")
+	nodesObserved := observed(inv, "nodes")
 	nodeCount, zoneCount := schedulableTopology(inv.Nodes)
 
 	// Single-node cluster: spreading is physically impossible and buys zero
@@ -135,7 +135,12 @@ func (r NoAntiAffinity) Evaluate(inv *collect.Inventory, opts Options) []types.F
 			why += " For stateful/quorum systems, a spread constraint complements but does not replace adequate replica count and application-level HA — adding topologySpreadConstraints alone does not make a small (e.g. 2-member) datastore highly available or resolve quorum/split-brain risk."
 		}
 
+		facts := []types.Fact{types.NewFact("spread.replicas", w.Replicas), types.NewFact("spread.pdb.bounded", pdbBounded)}
+		if nodesObserved {
+			facts = append(facts, types.NewFact("spread.nodes", nodeCount), types.NewFact("spread.zones", zoneCount))
+		}
 		out = append(out, types.Finding{
+			Facts:       facts,
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -221,26 +226,6 @@ func antiAffinityPDBCovers(pdbs []policyv1.PodDisruptionBudget, ns string, podLa
 			continue
 		}
 		if sel.Matches(labels.Set(podLabels)) {
-			return true
-		}
-	}
-	return false
-}
-
-// aaNodesCollected reports whether a collection step succeeded: the kind is
-// present in inv.Meta.Collected and absent from inv.Meta.Denied (denied entries
-// are formatted "<kind>: <err>"). File-local to avoid colliding with the
-// equivalent helper in sibling rule files. Used for the denial guard so we
-// never read an empty inv.Nodes as "single-node cluster" when the node list was
-// simply never returned.
-func aaNodesCollected(inv *collect.Inventory, kind string) bool {
-	for _, d := range inv.Meta.Denied {
-		if d == kind || strings.HasPrefix(d, kind+":") {
-			return false
-		}
-	}
-	for _, c := range inv.Meta.Collected {
-		if c == kind {
 			return true
 		}
 	}

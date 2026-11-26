@@ -51,8 +51,14 @@ func TestEngineVersion_MovesWhenTheFindingSetCan(t *testing.T) {
 
 	// Raise BOTH of these together, deliberately, whenever a rule or analyzer is added, removed or renamed.
 	const (
-		wantEngineVersion = "0.24.0"
-		wantDigest        = "6e243a2fe79cd197" // 104 rule + analyzer identities, as of 2026-10-27 (cluster-admin-user-or-group)
+		// 0.25.0 Batch 1: rightsizing withholds governed dimensions, prices per node, banks only a proven window.
+		// 0.26.0 Batch 2: declared reads, determinism, scheduler-faithful admission.
+		// 0.27.0 Batch 3: OOM, memory overcommit, drain duration, scale-down blockers, priority facts, diagram tables.
+		// 0.28.0 Batch 4: sharded usage, usage by owner, the series age gate, the under-provisioned half, used capacity.
+		// 0.29.0 Batch 5: the read set grows (webhooks, apiservices, VPA, pod metrics, Rollouts, Karpenter pools, CSINodes).
+		// 0.30.0 ENG-11: Argo Rollouts are workloads.
+		wantEngineVersion = "0.30.0"
+		wantDigest        = "8147fdeb5a18ca37" // 114 rule + analyzer identities, as of 2026-11-18 (Batch 5: webhook-unbacked, apiservice-unavailable)
 	)
 
 	if got := rules.EngineVersion(); got != wantEngineVersion {

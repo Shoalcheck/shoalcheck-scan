@@ -82,7 +82,12 @@ func (r DefaultSATokenAutomount) Evaluate(inv *collect.Inventory, opts Options) 
 		hasBindings := len(roles) > 0
 		usesProjectedToken := podLikelyUsesProjectedToken(w.PodSpec)
 
+		facts := []types.Fact{}
+		if rbacCollected {
+			facts = append(facts, types.NewFact("automount.roles", len(roles)))
+		}
 		out = append(out, types.Finding{
+			Facts:             facts,
 			ID:                findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:           &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:            r.ID(),

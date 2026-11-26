@@ -4,6 +4,12 @@ package types
 //
 // Every Finding renders to one card in the HTML report. Fields documented as
 // "rendered" appear directly on the card.
+// SpendShare is the part of a finding's monthly dollar that is one node's bill.
+type SpendShare struct {
+	Node string  `json:"node"`
+	USD  float64 `json:"usd"`
+}
+
 type Finding struct {
 	// ID is a stable hash of (RuleID + canonical resource ref). Used for
 	// idempotent diffing across audit runs in later phases.
@@ -101,6 +107,24 @@ type Finding struct {
 	// intent of LOOK HERE. Through a percentage formatter that became "conf 0%", which reads as "this finding
 	// is certainly wrong". Render it with report.confidenceWord.
 	Confidence float64 `json:"confidence"`
+
+	// Abstention marks a finding that says a question was NOT ASSESSED — a kind could not be read, no node carries
+	// a zone label — and claims nothing about the cluster's state. A denial may produce one; it may never produce a
+	// claim the full reading does not make (ENG-13, internal/scale/denial_test.go). Optional and additive: false on
+	// every finding that states something, and on readings written before the field.
+	Abstention bool `json:"abstention,omitempty"`
+
+	// SpendNodes is the nodes whose bill this finding's dollar is part of, each with its share (ENG-08). Two
+	// findings about the same node — a workload rightsized on it and the pool's instance-generation lag — each
+	// priced the node's full capacity, and the headline added both. With the nodes declared, the overlap is counted
+	// once (pipeline reconcileSpend) and the sum per node never passes the node's price. Optional: set by the rules
+	// whose dollars are compute on named nodes; Σ USD equals DollarImpactMonthly when present.
+	SpendNodes []SpendShare `json:"spendNodes,omitempty"`
+
+	// Facts are the values this finding states, typed and keyed from FactKeys, beside the sentences that state them
+	// (M-172, docs/engine/facts.md). Optional: absent on a rule that has not moved to facts, and on older readings —
+	// absence is "not computed by this engine version", never "none".
+	Facts []Fact `json:"facts,omitempty"`
 
 	// ClaimBoundaries is what this finding does NOT establish.
 	//

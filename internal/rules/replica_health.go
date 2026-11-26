@@ -75,6 +75,7 @@ func (r ReplicasBelowDesired) Evaluate(inv *collect.Inventory, opts Options) []t
 			return
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("replicas.desired", desired), types.NewFact("replicas.ready", ready)},
 			ID:          findingID(r.ID(), kind, ns, name),
 			IDBasis:     &types.ResourceRef{Kind: kind, Namespace: ns, Name: name},
 			RuleID:      r.ID(),
@@ -178,7 +179,7 @@ func (r ContainerRestartTotal) Evaluate(inv *collect.Inventory, opts Options) []
 	groups := map[string]*group{}
 	var order []string
 
-	owners := newOwnerIndex(inv) // one lookup per pod, not a walk of every Deployment per pod
+	owners := derived(inv, opts).ownerIndex() // one lookup per pod, not a walk of every Deployment per pod
 	for i := range inv.Pods {
 		p := &inv.Pods[i]
 		if !opts.IncludeSystem && isSystemNamespace(p.Namespace) {
@@ -231,6 +232,7 @@ func (r ContainerRestartTotal) Evaluate(inv *collect.Inventory, opts Options) []
 				"facts and this reading cannot compute the difference for you",
 			"a monitoring stack plots the rate continuously; this is the total, which is what a snapshot has")
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("restarts.worst", g.worst), types.NewFact("restarts.pods", len(g.pods)), types.NewFact("restarts.floor", restartFloor)},
 			ID:          findingID(r.ID(), "Pod", g.ns, g.label),
 			IDBasis:     &types.ResourceRef{Kind: "Pod", Namespace: g.ns, Name: g.label},
 			RuleID:      r.ID(),

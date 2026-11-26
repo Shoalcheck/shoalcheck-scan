@@ -194,10 +194,16 @@ func TestAllRegistry(t *testing.T) {
 	// manages, which the drain model had not checked; found by wiring the landing's per-node verdicts.
 	// RAISED TO 82 (2026-10-27, v0.1.1): ClusterAdminUserOrGroup — cluster-admin bound to a User or a Group, which
 	// no rule named until QA bound it to a person and the gate passed.
-	const nonPSSTableRules = 82
+	// RAISED TO 86 (2026-11-16, Batch 3): ContainerOOMKilled, NodeMemoryOvercommit, NodeDrainDuration and
+	// NodeScaleDownBlocked — signals already in memory that nothing read (ENG-30 to ENG-33).
+	// RAISED TO 87 (2026-11-16, Batch 4): UnderProvisioned, the under-provisioned half of rightsizing (ENG-52).
+	// RAISED TO 90 (2026-11-16, Batch 4): VolumeFilling, VolumeOversized and AutoscalerBehaviour, from a week of
+	// Prometheus (ENG-50, ENG-54).
+	// RAISED TO 92 (2026-11-18, Batch 5): WebhookUnbacked and APIServiceUnavailable, from the read set's first kinds.
+	const nonPSSTableRules = 92
 	want := nonPSSTableRules + len(pssChecks)
-	if want != 89 {
-		t.Fatalf("expected 89 rules total (82 + %d pssChecks), arithmetic says %d", len(pssChecks), want)
+	if want != 99 {
+		t.Fatalf("expected 99 rules total (92 + %d pssChecks), arithmetic says %d", len(pssChecks), want)
 	}
 	if got := len(All()); got != want {
 		t.Fatalf("registry has %d rules, want %d", got, want)

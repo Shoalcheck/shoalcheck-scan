@@ -30,7 +30,6 @@ import (
 	"github.com/Shoalcheck/shoalcheck-scan/internal/analyzers"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/collect"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/divergence"
-	"github.com/Shoalcheck/shoalcheck-scan/internal/headline"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/history"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/pricing"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/progress"
@@ -291,7 +290,8 @@ func read(ctx context.Context, opts Options) (*reading, error) {
 	// Phase 3: thread the analyzer-registry GVR union into Collect so the
 	// dynamic client lists exactly the operator CRDs an analyzer needs that are
 	// ALSO served by this cluster (collect intersects wantGVRs with PresentGVRs).
-	inv, err := opts.Collector.Collect(ctx, analyzers.RequiredGVRsUnion())
+	// The analyzers' kinds and the rules' own (Batch 5, docs/engine/read-set.md).
+	inv, err := opts.Collector.Collect(ctx, append(analyzers.RequiredGVRsUnion(), rules.EngineGVRs()...))
 	if err != nil {
 		prog.Error("collect", err.Error())
 		return nil, fmt.Errorf("collect: %w", err)
@@ -368,8 +368,7 @@ func read(ctx context.Context, opts Options) (*reading, error) {
 	}
 
 	// THE PROVIDER IS RESOLVED ONCE, HERE, AND EVERY DOLLAR ON THE PAGE COMES FROM IT — the rules' and the
-	// headline's alike. It used to be resolved after the rules had already priced everything from the
-	// embedded tables, which is how a refreshed bundle could move the cover and not the findings.
+	// headline's alike, so a refreshed bundle moves the cover and the findings together.
 	pp := opts.PriceProvider
 	if pp == nil {
 		pp = pricing.Embedded()
@@ -390,7 +389,8 @@ func read(ctx context.Context, opts Options) (*reading, error) {
 	if um != nil {
 		usageWindow = um.Window
 	}
-	ropts := rules.Options{IncludeSystem: opts.IncludeSystem, Usage: usage, UsageWindow: usageWindow, Temporal: temporal, Prices: pp}
+	ropts := rules.Options{IncludeSystem: opts.IncludeSystem, Usage: usage, UsageWindow: usageWindow, UsageBasis: um,
+		Temporal: temporal, Prices: pp}
 	if opts.PriorReadingsFor != nil {
 		ropts.PriorReadings = opts.PriorReadingsFor(name)
 	}
@@ -405,8 +405,29 @@ func (rd *reading) evaluate(ctx context.Context, opts Options, inv *collect.Inve
 	pp, name, um, dataSrc, res, ropts := rd.pp, rd.name, rd.um, rd.dataSrc, rd.res, rd.ropts
 	promC, promConnNote := rd.promC, rd.promConnNote
 	var findings []types.Finding
+	var failures []types.RuleFailure
+	var slow []string
+	// One set of derived indexes for this inventory, shared by every rule (ENG-22).
+	ropts.Derived = rules.NewDerived(inv)
 	for _, r := range rules.All() {
-		findings = append(findings, r.Evaluate(inv, ropts)...)
+		// The context is asked between rules: a cancelled reading stops at the next rule, not at the last.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		start := time.Now()
+		fs, f := isolated(r.ID(), func() []types.Finding { return r.Evaluate(inv, ropts) })
+		findings = append(findings, fs...)
+		if f != nil {
+			failures = append(failures, *f)
+		}
+		if d := time.Since(start); d >= 100*time.Millisecond {
+			slow = append(slow, fmt.Sprintf("%s %v", r.ID(), d.Round(time.Millisecond)))
+		}
+	}
+	if len(slow) > 0 {
+		// The run's own trace of where time went, in the log and never in the reading: a duration differs between
+		// two readings of the same cluster, and a reading is compared byte for byte.
+		fmt.Fprintf(log, "rules over 100 ms: %s\n", strings.Join(slow, ", "))
 	}
 
 	// Stack analyzers run on the SAME inventory and merge into the SAME findings
@@ -415,9 +436,27 @@ func (rd *reading) evaluate(ctx context.Context, opts Options, inv *collect.Inve
 	// "not found" noise, no fabricated PASS.
 	// analyzers.RunAll, not a loop here: internal/e2e needs the same one, and it had been walking
 	// rules.All() alone — so the analyzer path was never exercised against a real API server by anything.
-	findings = append(findings, analyzers.RunAll(inv)...)
+	for _, a := range analyzers.Eligible(inv) {
+		fs, f := isolated(a.ID(), func() []types.Finding { return a.Analyze(inv) })
+		findings = append(findings, fs...)
+		if f != nil {
+			failures = append(failures, *f)
+		}
+	}
 
+	reconcileSpend(findings, rules.NodeMonthlyPrices(inv, ropts))
 	ar := collect.BuildReport(inv, findings, name, opts.Discount, pp)
+	ar.Methodology.RuleFailures = failures
+	if len(failures) > 0 {
+		ids := make([]string, len(failures))
+		for i, f := range failures {
+			ids[i] = f.Rule
+			fmt.Fprintf(log, "rule %s failed and its findings are missing from this reading: %s\n", f.Rule, f.Error)
+		}
+		ar.Methodology.DataSources = append(ar.Methodology.DataSources, fmt.Sprintf("%s failed inside this reading "+
+			"and %s missing from it, which is not the same as none existing: %s.", nWord(len(failures), "rule", "rules"),
+			map[bool]string{true: "its findings are", false: "their findings are"}[len(failures) == 1], strings.Join(ids, ", ")))
+	}
 	// The checks a person would make by hand to cover the same ground: every rule above ran, over every
 	// object of every kind it reads.
 	countPairs(ar.Methodology.Volume, FindingDependencies())
@@ -426,163 +465,11 @@ func (rd *reading) evaluate(ctx context.Context, opts Options, inv *collect.Inve
 	// misleading near-zero headline into the honest $0/unpriced state; this
 	// surfaces the reason to the operator so it's caught before a paid run.
 	warnIfRegionUnpriced(log, ar.Cluster.Provider, ar.Cluster.Region)
-	// Pricing landed (Act 2): the summary chip ("N of M priced") then one
-	// node_priced per pool. An unpriced pool (SKU not in the table) streams
-	// Priced=false so the UI renders "unpriced", never "$0", never ticks.
-	emitPricing(prog, ar)
-	// Every finding gets a price basis before anything reads its dollar figure, because a zero in
-	// DollarImpactMonthly means three different things and every reader downstream had to guess.
-	classifyPriceBasis(ar.Findings)
-	// And which of the two headline claims it belongs to. The renderer may not import internal/rules, so the
-	// declaration travels on the finding — see pillar.go.
-	attachPillar(ar.Findings)
-	// And what each finding does NOT establish. After the rules have run, because a CONDITIONAL boundary is
-	// appended by a rule at Evaluate time and this merges the family ones in on top of it.
-	attachClaimBoundaries(ar.Findings)
-	// And who owns each one, when the operator has told us which namespace label says so.
-	attachOwner(ar.Findings, inv.Namespaces, opts.OwnerLabel)
-	// And whether each remediation command may be offered behind a one-click copy button. Same reason the
-	// two above are here: the renderer may not import internal/rules, and rules.SafeRemediationCommand is
-	// the single definition of which verbs get a button. See command_safety.go.
-	attachCommandSafety(ar, log)
-	// Finding cards (Act 2): streamed from the FINAL, report-order findings so the
-	// running dollar counter sums to exactly the report headline (validate.go
-	// enforces headline == Σ DollarImpactMonthly). One event per finding.
-	for i := range ar.Findings {
-		prog.FindingFound(progress.FindingEvt{Finding: &ar.Findings[i]})
+	// The assembly: every stage that attaches to the report, in the order their declarations derive (ENG-24).
+	if err := assemble(&assembly{ctx: ctx, rd: rd, opts: opts, inv: inv, prog: prog, log: log, ar: ar, ropts: ropts,
+		um: um, res: res, dataSrc: dataSrc, promC: promC, promConnNote: promConnNote}); err != nil {
+		return nil, err
 	}
-	// The opinion, once — after every finding is counted, because a podium formed halfway
-	// through the stream would be a guess. It is an additional event, not a reordering of the
-	// stream above: the stream records what was found in the order found, and this records what
-	// we think about it. Blurring the two would cost the stream its evidentiary value.
-	emitVerdict(prog, ar, inv.Meta.Context)
-	// Compliance is derived here, not in collect.BuildReport: internal/rules
-	// imports internal/collect for Inventory, so collect cannot import rules
-	// without a cycle. These are OBSERVATIONS mapped to controls, never an
-	// audit verdict — the renderer reframes Status="gap" as "Potential gap".
-	ar.Compliance = rules.BuildCompliance(ar.Findings)
-	// COVERAGE IS PASSED, NOT ASSUMED. A control PASSes only when its evidence rule ran; a rule whose inputs
-	// were refused returns nothing, which is indistinguishable from "found nothing" unless the assessment is
-	// told what the collector actually managed to read. Without this, a cluster whose auditor Role omits
-	// `clusterroles` would report "5.1.2 Minimize access to secrets: PASS".
-	ar.ComplianceAssessment = rules.BuildComplianceAssessmentWithCoverage(ar.Findings, inv.Meta.HasCollected)
-	if dataSrc != "" {
-		ar.Methodology.DataSources = append(ar.Methodology.DataSources, dataSrc)
-	}
-	ar.Methodology.UsageMethodology = um
-	// Complete the run basis with the settings only this layer knows. The comparison guard reads
-	// these to decide whether two readings are comparable at all: a run with usage and one without
-	// produce different rule populations, and a run that skipped system namespaces produces findings
-	// that appear and vanish wholesale from the setting rather than from the cluster.
-	if ar.Methodology.RunBasis == nil {
-		ar.Methodology.RunBasis = &types.RunBasis{}
-	}
-	ar.Methodology.RunBasis.IncludeSystem = opts.IncludeSystem
-	// The owner label and what it reached. "12 of 134 findings have an owner" is the honest form; four team
-	// names with no denominator would let a reader assume the rest were covered.
-	if opts.OwnerLabel != "" {
-		ar.Methodology.RunBasis.OwnerLabel = opts.OwnerLabel
-		ar.Methodology.RunBasis.OwnerResolved, ar.Methodology.RunBasis.OwnerOwnable = ownerCoverage(ar.Findings)
-	}
-	ar.Methodology.RunBasis.EngineVersion = rules.EngineVersion()
-	ar.Methodology.RunBasis.RuleSet = RuleSetStamp()
-	if um != nil {
-		ar.Methodology.RunBasis.UsageSource = um.Source
-		// The tier travels with the source, always — including when it is "unproven", which is the case
-		// a reader most needs to see. An absent field would read as "not applicable" and this is the one
-		// state where absence and unproven must not look alike.
-		if res.provenance.Tier != "" {
-			ar.Methodology.RunBasis.UsageTier = string(res.provenance.Tier)
-			ar.Methodology.RunBasis.UsageProvenance = res.provenance.Detail
-		}
-	}
-	// Observed service map: if a telemetry source is reachable through the SAME
-	// Prometheus the usage layer used, upgrade Architecture from Tier-3 declared to
-	// observed. The client is resolved once, in priority order:
-	//   1. explicit --prometheus-url (its own 30s-budget client for the heavier
-	//      mesh aggregation);
-	//   2. else the auto-connected client (service-proxy / opt-in port-forward)
-	//      that fetchUsage already built and Pinged — ONE connection powers both
-	//      usage-$ and the map, and adds no new RBAC (same kubeconfig + opt-in
-	//      role the usage path already used);
-	//   3. else none ⇒ stay on declared.
-	// Mirrors fetchUsage's degrade-gracefully contract: unreachable, detection
-	// error, or build error each leave the report on declared — never fatal,
-	// never a fabricated edge.
-	// SourceIngress (nginx/envoy ingress) is detected for completeness but is NOT
-	// a service mesh: it carries no service-to-service edge telemetry, so it must
-	// never promote Architecture to "observed" or be reported as "mesh present".
-	// Excluding it here leaves an ingress-only cluster honestly on TierDeclared.
-	// mapEvt defaults to the honest declared tier; the observed path below upgrades
-	// it. Exactly one MapBuilt is emitted (guard 4: the tier pill is never absent).
-	mapEvt := progress.MapBuilt{Tier: "declared", Window: "5m", NamespacesTotal: len(inv.Namespaces)}
-	if c, connNote := promC, promConnNote; c != nil && ar.Architecture != nil {
-		if src, derr := rd.telemetry(ctx, c); derr == nil && src != prom.SourceNone && src != prom.SourceIngress {
-			g, gerr := rd.observedGraph(ctx, c, src)
-			if gerr == nil {
-				// ONE READING, ONE CLOCK. The graph was dated by the wall clock inside BuildObservedGraph, so a
-				// reading taken at one moment said its traffic was observed at another — the sample, read on 15
-				// September, said "as of" the day it was regenerated. The map is the reading's: it is dated by the
-				// clock every other field of it is read against.
-				g.AsOf = ar.GeneratedAt
-				collect.ApplyObservedGraph(ar.Architecture, promGraphAdapter{g: g})
-				fmt.Fprintf(log, "service-map: %s telemetry%s — %d observed edges over %s (reporter=%s)\n",
-					g.Source, connNote, len(g.Edges), g.Window, g.Reporter)
-				mapEvt.Tier = "observed"
-				mapEvt.Source = string(g.Source)
-				mapEvt.Window = g.Window
-				mapEvt.Edges = len(g.Edges)
-				// Coverage the telemetry actually demonstrated. Left unassigned until
-				// B-007, this always emitted 0 beside a non-zero edge count — a contract
-				// field that promised observation coverage and understated it.
-				mapEvt.NamespacesObserved = g.NamespacesObserved
-				if len(g.Edges) == 0 {
-					// Mesh present, zero traffic in the window — a first-class honest
-					// state, never a blank map (guard 4).
-					mapEvt.Note = "mesh detected, but no service-to-service traffic in the " + g.Window + " window"
-				}
-			} else {
-				fmt.Fprintf(log, "service-map: %s detected but graph build failed (%v); staying on declared\n", src, gerr)
-				mapEvt.Note = "telemetry detected but the graph build failed — showing declared wiring"
-			}
-		} else if derr == nil && src == prom.SourceIngress {
-			mapEvt.Note = "ingress telemetry only — no service-to-service edges; showing declared wiring"
-		}
-	}
-	prog.MapReady(mapEvt)
-
-	// Stack-analyzer DataSources note: honestly state what the CR reads touched
-	// (status/spec only, never Secrets) and as-of when. GeneratedAt is stamped by
-	// BuildReport above.
-	ar.Methodology.DataSources = append(ar.Methodology.DataSources,
-		fmt.Sprintf("Stack CRDs: read via dynamic discovery (status/spec only, no secrets) as of %s", ar.GeneratedAt.Format("2006-01-02")))
-	// The coverage basis of every finding: what its rule rests on, and which of those this run read. Computed
-	// here because internal/report may not import internal/rules (depcheck rule 1), so the join has to happen on
-	// the pipeline side and travel on the schema.
-	attachFindingBasis(ar, opts.Recorder != nil)
-	// Things with a clock: dated obligations from findings that read a date and from the cluster's minor in its
-	// provider's support window, with every clock this run could not read named beside them. See calendar.go.
-	ar.Calendar = buildCalendar(inv, ar)
-
-	// Attached BEFORE redaction on purpose. The appendix contains no identifier, so redaction has nothing to
-	// do to it — and routing it through redact.Report anyway is what lets a test assert the redacted and
-	// unredacted appendices are byte-identical. Attaching afterwards would make that test trivially true and
-	// therefore worthless.
-	attachSessionTrace(ar, opts.Recorder, opts.RecorderSince, execPluginName(opts.Collector))
-	// AFTER the trace, necessarily: this joins findings to ledger rows, and the rows do not exist until the
-	// recorder has been read. It is also after attachFindingBasis, because it refines the basis that put the
-	// kinds there. Both orderings are load-bearing and a test asserts the join is non-empty on a real run.
-	attachRequestBasis(ar)
-
-	// The opening: at most five claims a stranger reads first, selected once here so the terminal, the document
-	// and the app cannot lead with different arguments.
-	//
-	// LAST ON PURPOSE, and a live run is what proved it has to be. Selected beside the calendar — three lines
-	// earlier — every run printed "this reading recorded no session trace" while the recorder held 84 requests,
-	// because attachSessionTrace had not run yet. One of the five lines is the reading's own cost, so the
-	// selection has to come after everything it quotes: the pillars, the calendar, the basis join and the trace.
-	h := headline.SelectWith(ar, headline.Options{ComputeDiscount: opts.Discount})
-	ar.Headline = &h
 
 	// Strip the control bytes a terminal acts on from every string the cluster supplied — a finding title, an
 	// evidence line, a resource name — BEFORE the reading is validated, kept or rendered. The report escapes
@@ -848,15 +735,11 @@ type FleetOptions struct {
 	// ONE URL ACROSS N CLUSTERS IS UNPROVEN FOR AT LEAST N-1 OF THEM, and since B-145 the product acts
 	// on that rather than describing it.
 	//
-	// This comment used to read "pointing it at one cluster's Prometheus will (best-effort) attribute
-	// that one endpoint's series to every cluster's rightsizing" — a limitation stated in a comment
-	// nobody reading the report would ever see. RunFleet calls Run per cluster, Run proves the source
-	// against THAT cluster's own pod UIDs, and a cluster whose pods are not in the source fails
-	// containment. So usage is now withheld per cluster, with the reason, and only the cluster the
-	// endpoint actually belongs to keeps its figures.
+	// RunFleet calls Run per cluster, and Run proves the source against THAT cluster's own pod UIDs; a cluster whose pods
+	// are not in the source fails containment. So usage is withheld per cluster, with the reason, and only the cluster
+	// the endpoint actually belongs to keeps its figures.
 	//
-	// Per-cluster runs remain better; they are no longer the difference between a right number and a
-	// wrong one.
+	// Per-cluster runs remain better; they are no longer the difference between a right number and a wrong one.
 	PrometheusURL string
 
 	// IncludeSystem evaluates rules in system namespaces too, for every cluster.
@@ -1159,19 +1042,28 @@ func fetchUsage(ctx context.Context, opts Options, inv *collect.Inventory, log i
 	pf := autoConnect(ctx, opts, services, servicesRead, log, &preClient, &connectMode)
 	res := usageResult{mapClient: preClient, connectMode: connectMode, portForward: pf}
 
+	vpaLister, metricsLister := tierListers(opts, inv)
 	p := prom.ResolveUsageProvider(ctx, prom.UsageConfig{
 		PrometheusURL:    opts.PrometheusURL,
 		PrometheusClient: preClient,
 		Auth:             opts.UsageAuth,
 		Services:         services,
-		VPALister:        opts.VPALister,
-		MetricsLister:    opts.MetricsLister,
+		VPALister:        vpaLister,
+		MetricsLister:    metricsLister,
 		ClientOptions:    promRecorderOpts(opts.Recorder),
 	})
 	m := p.Methodology()
 	res.methodology = &m
 
 	u, uerr := p.Usage(ctx)
+	// The methodology again, now that the read has happened: a sharded Prometheus read states its coverage —
+	// namespaces refused at every window, namespaces read over a shorter one — only after it ran (ENG-05).
+	m = p.Methodology()
+	if sr, ok := p.(prom.ShardReporter); ok {
+		if said := sr.Shards().UnreadSaid(); said != "" {
+			fmt.Fprintln(log, said) // the names stay in the log; the document carries the count
+		}
+	}
 	if uerr != nil {
 		// A reachable endpoint whose query failed is NOT fatal: warn and proceed
 		// without usage-based rightsizing.
@@ -1230,19 +1122,10 @@ func fetchUsage(ctx context.Context, opts Options, inv *collect.Inventory, log i
 
 // usageNote is the methodology sentence every consumption figure in the document rests on.
 //
-// IT USED TO PRINT AN EMPTY SLOT. The format string was
-// `"Usage: %s (%s, window %s) — %d container series"` and it assumed UsageMethodology.Backend is always
-// set. It is the resolved Prometheus FLAVOUR — thanos, mimir, amp, gmp, victoria-metrics — and is empty for
-// every other tier, which is metrics.k8s.io and VPA. Measured on the shipped golden:
-//
-//	Usage: metrics.k8s.io (, window instant) — 28 container series
-//
-// A leading comma and an empty first element, in a parenthetical, on the line that qualifies every
-// rightsizing number in the reading. It shipped on every non-Prometheus reading.
-//
-// The parenthetical is built from the parts that EXIST, and when none do it is not printed at all. Same
-// rule the money cells took in M-53: an absence is not a value, and printing it as one puts a slot on the
-// page where a reader looks for a fact.
+// THE PARENTHETICAL IS BUILT FROM THE PARTS THAT EXIST. UsageMethodology.Backend is the resolved Prometheus FLAVOUR
+// (thanos, mimir, amp, gmp, victoria-metrics) and is empty for every other tier, which is metrics.k8s.io and VPA; when
+// no part exists the parenthetical is not printed at all. Same rule the money cells took in M-53: an absence is not a
+// value, and printing it as one puts a slot on the page where a reader looks for a fact.
 func usageNote(m types.UsageMethodology, series int) string {
 	var parts []string
 	if m.Backend != "" {
@@ -1605,4 +1488,39 @@ func HistoryDeps() map[string]history.Deps {
 		out[id] = history.Deps{Kinds: d.Kinds, Usage: d.Usage, Datasets: datasetDepsFor(id), Producer: producer[id]}
 	}
 	return out
+}
+
+// withheldCaveat adds to the usage record how many workloads rightsizing did not offer because an autoscaler
+// governs the request (ENG-01), naming the dimensions. The finding set alone cannot say it: a withheld workload is
+// absent, and absence reads as "right-sized". A copy, so the provider's own record is not changed under it.
+func withheldCaveat(um *prom.UsageMethodology, withheld []string) *prom.UsageMethodology {
+	if um == nil || len(withheld) == 0 {
+		return um
+	}
+	cpu, mem := 0, 0
+	for _, w := range withheld {
+		if strings.Contains(w, "(CPU") {
+			cpu++
+		}
+		if strings.Contains(w, "memory)") {
+			mem++
+		}
+	}
+	out := *um
+	out.Caveats = append(append([]string{}, um.Caveats...), fmt.Sprintf(
+		"%s withheld from rightsizing: an autoscaler scales on the utilization of the request (CPU on %d, memory on %d), "+
+			"so a lower request adds replicas and saves nothing.", nWord(len(withheld), "workload", "workloads"), cpu, mem))
+	return &out
+}
+
+// isolated runs one rule or analyzer, and a panic in it becomes a RuleFailure instead of the end of the reading
+// (ENG-23). There was no recover anywhere in the engine: one rule's nil dereference on an object nobody had
+// imagined took every other rule's findings with it.
+func isolated(id string, run func() []types.Finding) (out []types.Finding, failure *types.RuleFailure) {
+	defer func() {
+		if p := recover(); p != nil {
+			out, failure = nil, &types.RuleFailure{Rule: id, Error: fmt.Sprint(p)}
+		}
+	}()
+	return run(), nil
 }

@@ -123,6 +123,7 @@ func (r RiskyRolloutStrategy) Evaluate(inv *collect.Inventory, opts Options) []t
 		}
 
 		out = append(out, types.Finding{
+			Facts:             []types.Fact{types.NewFact("replicas.desired", replicas), types.NewFact("rollout.strategy", string(d.Spec.Strategy.Type)), types.NewFact("rollout.fronted", fronted)},
 			ID:                findingID(r.ID(), "Deployment", d.Namespace, d.Name),
 			IDBasis:           &types.ResourceRef{Kind: "Deployment", Namespace: d.Namespace, Name: d.Name},
 			RuleID:            r.ID(),

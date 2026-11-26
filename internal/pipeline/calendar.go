@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sort"
 	"strings"
 	"time"
@@ -91,6 +93,13 @@ func buildCalendar(inv *collect.Inventory, ar *types.AuditReport) *types.Calenda
 	}
 	if reason := certificatesNotAssessed(inv); reason != "" {
 		cal.NotAssessed = append(cal.NotAssessed, types.ClockNotAssessed{Clock: clockCertificates, Reason: reason})
+	}
+
+	// Karpenter's own clock (ENG-43): a node expires its NodePool's expireAfter after it was created.
+	if rows, reason := karpenterRows(inv, day, hasDay); reason != "" {
+		cal.NotAssessed = append(cal.NotAssessed, types.ClockNotAssessed{Clock: clockKarpenter, Reason: reason})
+	} else {
+		cal.Rows = append(cal.Rows, rows...)
 	}
 
 	// Dataset rows: the cluster's minor in its provider's window.
@@ -252,6 +261,68 @@ func supportWindowRows(inv *collect.Inventory, ar *types.AuditReport, day time.T
 	if window.ExtendedEnds != "" {
 		rows = append(rows, dataset(window.ExtendedEnds,
 			fmt.Sprintf("the paid extension for Kubernetes %s on %s %s %s", minor, name, tense(window.ExtendedEnds), window.ExtendedEnds), nil))
+	}
+	return rows, ""
+}
+
+// clockKarpenter names Karpenter's node expiry among the clocks.
+const clockKarpenter = "Karpenter node expiry (NodePool expireAfter)"
+
+var nodePoolsGVR = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}
+
+// karpenterRows are the dates Karpenter replaces nodes on: each node it launched expires its NodePool's expireAfter
+// after its creationTimestamp. One row per pool and day, with how many nodes, so a pool of forty nodes launched
+// together is one row, not forty. No row when no node carries a pool's label. The reason is set when Karpenter's
+// nodes are here and its NodePools were not read.
+func karpenterRows(inv *collect.Inventory, day time.Time, hasDay bool) ([]types.CalendarRow, string) {
+	pools := map[string]bool{}
+	for i := range inv.Nodes {
+		if p := inv.Nodes[i].Labels["karpenter.sh/nodepool"]; p != "" {
+			pools[p] = true
+		}
+	}
+	if len(pools) == 0 {
+		return nil, ""
+	}
+	if !collect.Observed(inv, collect.CRStepPrefix+nodePoolsGVR.GroupResource().String()) {
+		return nil, "nodes carry karpenter.sh/nodepool labels and the NodePools were not read, so their expireAfter is unknown"
+	}
+	expire := map[string]time.Duration{}
+	said := map[string]string{}
+	for _, o := range inv.StackObjects[nodePoolsGVR] {
+		s, ok, _ := unstructured.NestedString(o.Object, "spec", "template", "spec", "expireAfter")
+		if !ok || s == "" || s == "Never" {
+			continue
+		}
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			continue
+		}
+		expire[o.GetName()], said[o.GetName()] = d, s
+	}
+	type key struct{ pool, date string }
+	count := map[key]int{}
+	for i := range inv.Nodes {
+		n := &inv.Nodes[i]
+		pool := n.Labels["karpenter.sh/nodepool"]
+		d, ok := expire[pool]
+		if !ok || n.CreationTimestamp.IsZero() {
+			continue
+		}
+		count[key{pool, n.CreationTimestamp.Add(d).UTC().Format("2006-01-02")}]++
+	}
+	var rows []types.CalendarRow
+	for k, n := range count {
+		row := types.CalendarRow{
+			Date:   k.date,
+			Kind:   types.CalendarRowObject,
+			Object: &types.ResourceRef{Kind: "NodePool", Name: k.pool},
+			Field:  "spec.template.spec.expireAfter",
+			Observation: fmt.Sprintf("NodePool %s sets expireAfter %s; %s it launched reach that age on %s, and Karpenter replaces them then",
+				k.pool, said[k.pool], nWord(n, "node", "nodes"), k.date),
+		}
+		row.Passed = hasDay && datePassed(row.Date, day)
+		rows = append(rows, row)
 	}
 	return rows, ""
 }

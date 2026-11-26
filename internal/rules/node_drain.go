@@ -124,14 +124,13 @@ func isLivePod(p corev1.Pod) bool {
 	return true
 }
 
-// buildDrainPlacement indexes pods by node. Recomputed per rule because the Rule interface takes
-// only (inv, opts) and inventing cross-rule state would be worse than the cost — the loop is over a
-// slice already in memory.
+// buildDrainPlacementWith indexes pods by node, attributing each through the owner index it is given. Built once
+// per reading and shared (rules.Derived, ENG-22): the comment that stood here said cross-rule state would be worse
+// than the cost, and was true until the cost was the owner index rebuilt by every drain rule on 34,000 pods.
 //
 // opts.IncludeSystem governs what is REPORTED, not what is counted: a system pod still has to be
 // evicted for the drain to finish, so excluding it from the totals would understate the operation.
-func buildDrainPlacement(inv *collect.Inventory) map[string]*drainPlacement {
-	owners := newOwnerIndex(inv)
+func buildDrainPlacementWith(inv *collect.Inventory, owners *ownerIndex) map[string]*drainPlacement {
 	out := map[string]*drainPlacement{}
 	for i := range inv.Nodes {
 		n := inv.Nodes[i]
@@ -300,6 +299,7 @@ func (r NodeDrainUnmanaged) Evaluate(inv *collect.Inventory, opts Options) []typ
 			refs = append(refs, types.ResourceRef{Kind: "Pod", Namespace: ns, Name: name})
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("drain.pods.unmanaged", len(pods))},
 			ID:          findingID(r.ID(), "Node", "", node+"|unmanaged"),
 			IDBasis:     &types.ResourceRef{Kind: "Node", Name: node + "|unmanaged"},
 			RuleID:      r.ID(),
@@ -356,7 +356,7 @@ func (r NodeDrainBudget) Evaluate(inv *collect.Inventory, opts Options) []types.
 	if !drainInputsOK(inv) || !observed(inv, "poddisruptionbudgets") {
 		return out
 	}
-	placement := buildDrainPlacement(inv)
+	placement := derived(inv, opts).drainPlacement()
 	// ONE COMPILE PER BUDGET, not one per budget per node: a selector does not depend on the node it is asked
 	// about, and compiling 500 of them for each of 2,000 nodes was half of what this rule cost on a large cluster.
 	sels := make([]labels.Selector, len(inv.PDBs))
@@ -439,6 +439,7 @@ func budgetFinding(inv *collect.Inventory, pl *drainPlacement, pdb *policyv1.Pod
 	}
 
 	ev := []string{snapshotNote(inv)}
+	var facts []types.Fact
 	var headline, why string
 	confidence := 1.0
 
@@ -488,14 +489,10 @@ func budgetFinding(inv *collect.Inventory, pl *drainPlacement, pdb *policyv1.Pod
 	case int32(j) > st.DisruptionsAllowed:
 		rounds := (j + int(st.DisruptionsAllowed) - 1) / int(st.DisruptionsAllowed)
 		headline = fmt.Sprintf("Drain of %s serializes under budget %s/%s", node, pdb.Namespace, pdb.Name)
-		ev = append(ev, fmt.Sprintf(
-			"PodDisruptionBudget %s/%s reports status.disruptionsAllowed=%d over "+
-				"status.expectedPods=%d. It covers %s bound to node %s: %s. Evicting them "+
-				"therefore takes at least %s, each waiting until a replacement "+
-				"is counted healthy before the next eviction is permitted.",
-			pdb.Namespace, pdb.Name, st.DisruptionsAllowed, st.ExpectedPods,
-			nWord(j, "live pod", "live pods"), node, strings.Join(names, ", "),
-			nWord(rounds, "budget-limited round", "budget-limited rounds")))
+		facts = append(facts, types.NewFact("drain.rounds", rounds))
+		ev = append(ev, serializedLine(pdb.Namespace, pdb.Name, node, names, append(facts,
+			types.NewFact("drain.pods.covered", j), types.NewFact("drain.disruptions.allowed", st.DisruptionsAllowed),
+			types.NewFact("drain.pods.expected", st.ExpectedPods))))
 		why = "The drain is permitted but not immediate: the budget forces the evictions into rounds. " +
 			"This audit states the number of rounds, which is arithmetic; how long a round takes " +
 			"depends on the workload and is not knowable from a snapshot."
@@ -513,7 +510,10 @@ func budgetFinding(inv *collect.Inventory, pl *drainPlacement, pdb *policyv1.Pod
 	ev = append(ev, pdbBypassNote)
 	ev = append(ev, endpointEvidence(inv, covered)...)
 
+	facts = append(facts, types.NewFact("drain.pods.covered", j), types.NewFact("drain.disruptions.allowed", st.DisruptionsAllowed),
+		types.NewFact("drain.pods.expected", st.ExpectedPods))
 	return types.Finding{
+		Facts:   facts,
 		ID:      findingID((NodeDrainBudget{}).ID(), "Node", pdb.Namespace, node+"|"+pdb.Name),
 		IDBasis: &types.ResourceRef{Kind: "Node", Namespace: pdb.Namespace, Name: node + "|" + pdb.Name},
 		// What THIS reading could not establish about these pods. The pipeline merges the family boundaries
@@ -595,8 +595,8 @@ func (r NodePlacementConcentration) Evaluate(inv *collect.Inventory, opts Option
 	if !drainInputsOK(inv) {
 		return out
 	}
-	placement := buildDrainPlacement(inv)
-	index := newOwnerIndex(inv)
+	placement := derived(inv, opts).drainPlacement()
+	index := derived(inv, opts).ownerIndex()
 	live := index.livePodsByOwner(inv)
 	endpoints := newEndpointIndex(inv)
 
@@ -669,7 +669,12 @@ func (r NodePlacementConcentration) Evaluate(inv *collect.Inventory, opts Option
 					"necessarily a voluntary operation.")
 			}
 
+			pf := []types.Fact{types.NewFact("placement.colocated", onNode), types.NewFact("placement.live", total)}
+			if known {
+				pf = append(pf, types.NewFact("replicas.desired", desired))
+			}
 			out = append(out, types.Finding{
+				Facts:   pf,
 				ID:      findingID(r.ID(), "Node", o.Namespace, nodeName+"|"+o.Kind+"/"+o.Name),
 				IDBasis: &types.ResourceRef{Kind: "Node", Namespace: o.Namespace, Name: nodeName + "|" + o.Kind + "/" + o.Name},
 				// What THIS reading could not establish about where this workload's pods sit in a Service.
@@ -758,7 +763,7 @@ func (r NodePinnedVolume) Evaluate(inv *collect.Inventory, opts Options) []types
 		pvcByKey[inv.PVCs[i].Namespace+"/"+inv.PVCs[i].Name] = &inv.PVCs[i]
 	}
 
-	placement := buildDrainPlacement(inv)
+	placement := derived(inv, opts).drainPlacement()
 	for _, nodeName := range sortedNodeNames(placement) {
 		pl := placement[nodeName]
 
@@ -844,10 +849,9 @@ func pinnedPVsFor(p corev1.Pod, pvcByKey map[string]*corev1.PersistentVolumeClai
 
 // pvPinsToNode reports whether the PV's required node affinity names this specific node by hostname.
 //
-// ONLY A HOSTNAME MATCH COUNTS HERE, AND ZONE LEVEL IS NOW COVERED ELSEWHERE. This comment used to say a
-// zone-level requirement was "deliberately out of this pass" and stop there; it is in scope as of
-// 2026-08-29, in ZonePinnedVolume (internal/rules/feasibility.go), and the old exclusion is rewritten rather
-// than deleted because a widening that quietly removes a limit reads as if the limit never existed.
+// ONLY A HOSTNAME MATCH COUNTS HERE; ZONE LEVEL IS COVERED IN ZonePinnedVolume (internal/rules/feasibility.go). The
+// limit stays stated rather than deleted, because a widening that quietly removes a limit reads as if the limit never
+// existed.
 //
 // HOW THE ZONE CLAIM IS WEAKER, exactly. A hostname-pinned volume names WHERE the pod is, so it blocks a
 // drain of that node: there is no other node the volume permits. A ZONAL disk constrains where a pod MAY GO
@@ -855,10 +859,10 @@ func pinnedPVsFor(p corev1.Pod, pvcByKey map[string]*corev1.PersistentVolumeClai
 // unaffected. What a zonal disk blocks is the pod leaving the zone at all, which is a zone-loss statement and
 // not a drain statement. Two different claims, and this rule makes only the stronger one.
 //
-// NAMED AND ALONE. A volume whose affinity names this node AND another one (a hostname In list of two, or two
-// terms) is satisfied by either, so a drain of this node leaves the pod the other: the first name used to match
-// and the drain was reported blocked by a volume that does not block it. A pin holds only when no other node in
-// the reading satisfies the volume, the same pvAdmits the placement model asks.
+// NAMED AND ALONE. A volume whose affinity names this node AND another one (a hostname In list of two, or two terms)
+// is satisfied by either, so a drain of this node leaves the pod the other: matching the first name alone would report
+// the drain blocked by a volume that does not block it. A pin holds only when no other node in the reading satisfies
+// the volume, the same pvAdmits the placement model asks.
 func pvPinsToNode(pv *corev1.PersistentVolume, nodeName string, nodes []corev1.Node) bool {
 	if !pvNamesNode(pv, nodeName) {
 		return false
@@ -965,6 +969,7 @@ func pinnedVolumeFinding(inv *collect.Inventory, r NodePinnedVolume, nodeName st
 		ns = pv.Spec.ClaimRef.Namespace
 	}
 	return types.Finding{
+		Facts:   []types.Fact{types.NewFact("pin.pods", n), types.NewFact("pin.statefulset", statefulOwner)},
 		ID:      findingID(r.ID(), "Node", ns, nodeName+"|"+pv.Name),
 		IDBasis: &types.ResourceRef{Kind: "Node", Namespace: ns, Name: nodeName + "|" + pv.Name},
 		RuleID:  r.ID(), RuleVersion: r.Version(),
@@ -1318,6 +1323,12 @@ func (r NodeDrainBudget) RequiredKinds() []string {
 	return []string{"nodes", "poddisruptionbudgets", "pods"}
 }
 
+// EvidenceKinds — read for the evidence only: which covered pods are published endpoints, and which workload owns
+// each. Refusing them changes no claim (internal/scale/declared_test.go proves it), so they are not required.
+func (r NodeDrainBudget) EvidenceKinds() []string {
+	return []string{"deployments", "endpointslices", "statefulsets"}
+}
+
 // RequiredKinds — The workload lists are a SUPPRESSION input, which is why they are load-bearing in the dangerous
 // direction: desiredReplicas is how this rule declines to report a rollout in flight, so a denied
 // Deployment list turns a suppressed non-finding into a false positive.
@@ -1325,6 +1336,9 @@ func (r NodeDrainBudget) RequiredKinds() []string {
 func (r NodePlacementConcentration) RequiredKinds() []string {
 	return []string{"deployments", "nodes", "pods", "statefulsets"}
 }
+
+// EvidenceKinds — EndpointSlices say which pods are published endpoints, in the evidence only.
+func (r NodePlacementConcentration) EvidenceKinds() []string { return []string{"endpointslices"} }
 
 // RequiredKinds — the nodes the drain is asked about and the pods on them; nothing else decides the client's
 // refusal. See deps.go for what belongs in this list.
@@ -1335,7 +1349,8 @@ func (r NodeDrainUnmanaged) RequiredKinds() []string {
 // RequiredKinds — Both volume lists: a PVC without its PV says nothing about where the volume can be attached.
 // See deps.go for what belongs in this list.
 func (r NodePinnedVolume) RequiredKinds() []string {
-	return []string{"nodes", "persistentvolumeclaims", "persistentvolumes", "pods"}
+	// The drain placement assesses only pods with a Deployment or StatefulSet ancestor, so those are read too.
+	return []string{"deployments", "nodes", "persistentvolumeclaims", "persistentvolumes", "pods", "statefulsets"}
 }
 
 // endpointBoundaries is what THIS reading could not establish about these pods' place in a Service.
@@ -1389,4 +1404,17 @@ func pick(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// serializedLine is the serialized drain's sentence, rendered from the facts (M-172): the budget's own status figures
+// and the rounds they force.
+func serializedLine(ns, name, node string, pods []string, fs []types.Fact) string {
+	return fmt.Sprintf(
+		"PodDisruptionBudget %s/%s reports status.disruptionsAllowed=%d over "+
+			"status.expectedPods=%d. It covers %s bound to node %s: %s. Evicting them "+
+			"therefore takes at least %s, each waiting until a replacement "+
+			"is counted healthy before the next eviction is permitted.",
+		ns, name, int(types.FactNum(fs, "drain.disruptions.allowed")), int(types.FactNum(fs, "drain.pods.expected")),
+		nWord(int(types.FactNum(fs, "drain.pods.covered")), "live pod", "live pods"), node, strings.Join(pods, ", "),
+		nWord(int(types.FactNum(fs, "drain.rounds")), "budget-limited round", "budget-limited rounds"))
 }

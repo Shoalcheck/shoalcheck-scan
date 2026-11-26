@@ -55,12 +55,10 @@ type Family struct {
 // For returns every family boundary that applies to a rule, in DECLARATION ORDER and de-duplicated. An
 // empty result is a defect, not a state: rules.TestEveryRuleCarriesABoundary fails on one.
 //
-// IT USED TO SORT THEM ALPHABETICALLY, and the reason was determinism — two readings of one cluster must
-// produce the same bytes. That property is real and it was never the sort's to give: Families is a slice and
-// each family's Lines is a slice, so this loop is already deterministic. What the sort DID do was throw away
-// the order somebody wrote. Measured on stack.hpa.no-headroom in `shoalcheck explain`: the sentence saying what
-// KIND of claim the finding is — "this is arithmetic on the numbers the object states about itself" — came
-// third, behind two qualifications of a claim the reader had not yet been told the shape of.
+// THE ORDER IS THE ORDER SOMEBODY WROTE, NOT ALPHABETICAL. Determinism — two readings of one cluster produce the same
+// bytes — does not need a sort: Families is a slice and each family's Lines is a slice, so this loop is already
+// deterministic. Sorting would throw away the author's order, and the sentence saying what KIND of claim the finding
+// is ("this is arithmetic on the numbers the object states about itself") has to come before the qualifications of it.
 //
 // A rule in two families gets the first family's lines first. That is a choice, and it is the only one that
 // does not need a second table to express: the order families appear in this file.
@@ -182,6 +180,51 @@ var Families = []Family{
 		},
 	},
 	{
+		Name: "admission and aggregation — what is declared and published, not a request",
+		Rules: []string{
+			"k8s.reliability.webhook-unbacked",
+			"k8s.reliability.apiservice-unavailable",
+		},
+		Lines: []string{
+			"No request was sent through the webhook or the aggregated API: what is read is its declaration and what its Service publishes, at one instant.",
+			"A webhook called by URL is not assessed; its backend is outside the cluster's objects. Its address is never read.",
+			"Endpoints change by the second during a rollout; a webhook reported with none behind it may have had them a moment later.",
+		},
+	},
+	{
+		Name: "under-provisioned — measured usage above what was reserved",
+		Rules: []string{
+			"k8s.reliability.under-provisioned-requests",
+		},
+		Lines: []string{
+			"The figure is the busiest replica's, from the reading's usage source, over the window that source held; a figure from one moment or from a VPA's estimate is said as that, and is a lead rather than a measurement.",
+			"Whether the container was throttled, evicted or killed was not observed here: the usage is above what it reserved, which is the condition under which that happens first.",
+			"No cost is stated for raising a request. Whether the cluster already has the room is the capacity table's question, not this finding's.",
+		},
+	},
+	{
+		Name: "scale-down blockers — the autoscaler's rules, not its decision",
+		Rules: []string{
+			"k8s.cost.node-scale-down-blocked",
+		},
+		Lines: []string{
+			"Whether the node is needed was not established: a blocked node may be full and wanted. Its price is what it bills while blocked, never a saving, and no dollar is summed.",
+			"The autoscaler's own flags live in its arguments and were not read; where a rule depends on one, its default is named as a default.",
+			"The autoscaler was detected from its API or its Deployment's name; one installed under another name is not seen, and then this rule says nothing.",
+		},
+	},
+	{
+		Name: "drain duration — the declared wait, not the time taken",
+		Rules: []string{
+			"k8s.reliability.node-drain-duration",
+		},
+		Lines: []string{
+			"The grace period is the longest the kubelet waits after the stop signal; how long the pods really take to stop was not observed, and most exit at once.",
+			"The provider's own drain timeout — a managed node group's, an upgrade's surge — is set outside the cluster and was not read, so whether it is shorter than this wait is not established.",
+			"Whether a pod behind a Service drops connections depends on its own shutdown handling, which is code this reading cannot see; a missing preStop hook is the declaration, not an observed loss.",
+		},
+	},
+	{
 		Name: "drain — the voluntary path only",
 		Rules: []string{
 			"k8s.reliability.node-drain-budget",
@@ -206,7 +249,7 @@ var Families = []Family{
 		},
 		Lines: []string{
 			"The model checks a SUBSET of the scheduler's predicates, which is what makes the negative sound: a model more permissive than the scheduler finding no fit means the scheduler finds none either. The positive does not follow and is never asserted — that no pod here is listed is not a claim that any pod would be placed.",
-			"The scheduler's own configuration is unreadable on a managed cluster, admission injects containers into the pod that actually gets placed, and per-node volume-attach limits and max-pods are not read. Preemption is unmodelled.",
+			"The scheduler's own configuration is unreadable on a managed cluster, admission injects containers into the pod that actually gets placed, and max-pods is not read. Per-node volume-attach limits are read from each node's CSINode when the reading holds it, and are not modelled when it does not. Preemption is unmodelled.",
 			"No cost follows from this. Not a node count, not a smaller configuration, not a figure — a pod having nowhere to go says nothing about what the cluster should be sized at.",
 		},
 	},
@@ -239,6 +282,7 @@ var Families = []Family{
 			"The figure is computed from a dated public list price, not from your bill. No credential of yours was used and no invoice was read, so a negotiated rate, a private offer or a credit is invisible here.",
 			"Whether a commitment already covers this footprint is a billing-account fact this product cannot see. A saving stated at the on-demand rate is wrong for the term of any plan that already applies.",
 			"Identified is not realised. Nothing here has been reclaimed, and the arithmetic assumes the freed capacity is actually given up rather than absorbed elsewhere.",
+			"Traffic between zones is not priced. Pricing it needs the bytes sent from each zone to each other zone, and nothing this reads carries them: not the Kubernetes API, not kube-state-metrics, not cAdvisor; a Hubble flow count counts flows, not bytes. A cluster spread across zones may pay a transfer line this reading does not show.",
 		},
 	},
 	{
@@ -254,6 +298,7 @@ var Families = []Family{
 		Rules: []string{
 			"k8s.cost.node-headroom",
 			"k8s.cost.kubernetes-version-past-standard-support",
+			"k8s.cost.volume-oversized",
 		},
 		Lines: []string{
 			"The dollar impact is zero on purpose. This is a candidate to investigate with real utilisation, not a saving: requests-only slack cannot tell an idle pool from one whose pods under-request against what they actually use, and acting on the second packs a cluster into an OOM.",
@@ -301,10 +346,13 @@ var Families = []Family{
 		Name: "observed — from metrics, where absent means not assessed",
 		Rules: []string{
 			"k8s.observed.alerts-firing", "k8s.observed.cpu-throttled", "k8s.observed.scrape-targets-down",
+			"k8s.observed.volume-filling", "k8s.observed.autoscaler-behaviour", "k8s.cost.volume-oversized",
 		},
 		Lines: []string{
 			"This is sourced from a metrics endpoint, so its absence is a third state — not assessed — distinct from clean. When no source was reachable the rule emits nothing rather than an all-clear.",
 			"Throttling is a ratio of period counters over the measured window. It is not a count of seconds a container spent throttled, and it is not a statement that anything was slow.",
+			"A volume's days to full is a straight line through its used bytes over the window. A volume that grows in steps, or that a job empties, fills on its own schedule.",
+			"An autoscaler's time at its floor or its ceiling is counted in 5-minute steps of kube-state-metrics' series. The load behind it was not read, and whether it was served is not established.",
 		},
 	},
 	{
@@ -401,7 +449,7 @@ var Families = []Family{
 		Name: "observed state — one instant, never a rate or a cause",
 		Rules: []string{
 			"k8s.reliability.pod-not-ready", "k8s.reliability.replicas-below-desired",
-			"k8s.reliability.container-restart-total", "k8s.reliability.condition-unchanged",
+			"k8s.reliability.container-restart-total", "k8s.reliability.container-oom-killed", "k8s.reliability.node-memory-overcommit", "k8s.reliability.condition-unchanged",
 			"k8s.reliability.pvc-pending", "k8s.reliability.pvc-below-request",
 			"k8s.reliability.cronjob-no-recent-success", "k8s.reliability.daemonset-misscheduled",
 			"k8s.reliability.unmanaged-pod", "k8s.reliability.rwo-volume-shared",
@@ -424,6 +472,7 @@ var Families = []Family{
 		Lines: []string{
 			"This is a state read at one instant. The snapshot has no time axis, so nothing here is a rate, a trend or a duration — a restart count is a total the kubelet reports, not a frequency.",
 			"No cause is asserted. The reading records what the cluster says about itself; why it says it is outside what a read-only client can see.",
+			"Kubernetes Events were not read, by decision: an event stream is a rolling window that says something different each minute, so a reading built on it could not be compared with the next one. What an event would add is taken from state instead: the last termination reason, the waiting reason, the conditions and the scheduler's own message on a Pending pod.",
 		},
 	},
 	{

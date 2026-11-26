@@ -145,6 +145,7 @@ func (r HPAPinnedAtMax) Evaluate(inv *collect.Inventory, opts Options) []types.F
 		}
 		target := fmt.Sprintf("%s %s/%s", h.Spec.ScaleTargetRef.Kind, h.Namespace, h.Spec.ScaleTargetRef.Name)
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("hpa.replicas.current", h.Status.CurrentReplicas), types.NewFact("hpa.replicas.max", h.Spec.MaxReplicas), types.NewFact("hpa.replicas.desired", h.Status.DesiredReplicas)},
 			ID:          findingID(r.ID(), "HorizontalPodAutoscaler", h.Namespace, h.Name),
 			IDBasis:     &types.ResourceRef{Kind: "HorizontalPodAutoscaler", Namespace: h.Namespace, Name: h.Name},
 			RuleID:      r.ID(),
@@ -279,6 +280,7 @@ func (r PVCPendingWithBlockedConsumer) Evaluate(inv *collect.Inventory, opts Opt
 			evidence = append(evidence, fmt.Sprintf("spec.storageClassName=%q (the class object itself was not read)", *sc))
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("pvc.consumers.pending", len(names))},
 			ID:          findingID(r.ID(), "PersistentVolumeClaim", pvc.Namespace, pvc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name},
 			RuleID:      r.ID(),
@@ -491,6 +493,7 @@ func (r IngressBackendUnresolved) Evaluate(inv *collect.Inventory, opts Options)
 		ing := p.ing
 		evidence := append(append(append([]string{}, p.evidence...), p.notes...), coverage)
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("ingress.backends.unresolved", len(p.evidence))},
 			ID:          findingID(r.ID(), "Ingress", ing.Namespace, ing.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Ingress", Namespace: ing.Namespace, Name: ing.Name},
 			RuleID:      r.ID(),
@@ -647,12 +650,9 @@ type CronJobNoRecentSuccess struct{}
 // TEST COVERAGE, STATED: unit tests AND live, all three states, on the kind testbed
 // (testdata/testbed/cronjobs.yaml).
 //
-// This comment used to say the positive branch was unreachable because "status is controller-owned — it
-// cannot be written by hand". That was simply wrong: the status subresource is writable,
-// `kubectl patch --subresource=status`, and the wrong claim was doing real work — it was the recorded
-// reason the branch went unwitnessed. Both positives are now verified against a live cluster:
-// "succeeded 9 days ago" and "scheduled, never succeeded", each printing its own sentence, with a
-// suspended CronJob beside them excluded and disclosed in the coverage line.
+// The status subresource is writable (`kubectl patch --subresource=status`), so the positive branch is reachable. Both
+// positives are verified against a live cluster: "succeeded 9 days ago" and "scheduled, never succeeded", each
+// printing its own sentence, with a suspended CronJob beside them excluded and disclosed in the coverage line.
 //
 // The fixture ages two timestamps rather than waiting seven days for one and an hour for the other. It
 // fabricates the INPUT — the state the controller would publish given time — and never the output.
@@ -785,7 +785,13 @@ func (r CronJobNoRecentSuccess) Evaluate(inv *collect.Inventory, opts Options) [
 		}
 		evidence = append(evidence, coverage)
 
+		facts := []types.Fact{types.NewFact("cronjob.never", h.never), types.NewFact("cronjob.window", cronJobSuccessWindow.Seconds())}
+		if !h.never {
+			facts = append(facts, types.NewFact("cronjob.last-success", cj.Status.LastSuccessfulTime.UTC().Format(time.RFC3339)),
+				types.NewFact("cronjob.success.age", reading.Sub(cj.Status.LastSuccessfulTime.Time).Seconds()))
+		}
 		out = append(out, types.Finding{
+			Facts:        facts,
 			ID:           findingID(r.ID(), "CronJob", cj.Namespace, cj.Name),
 			IDBasis:      &types.ResourceRef{Kind: "CronJob", Namespace: cj.Namespace, Name: cj.Name},
 			RuleID:       r.ID(),

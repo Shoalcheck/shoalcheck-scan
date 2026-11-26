@@ -161,6 +161,7 @@ func (r UnattachedVolume) Evaluate(inv *collect.Inventory, opts Options) []types
 			fmt.Sprintf("reading taken %s", stamp(readingTime(inv))))
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("pv.capacity", q.Value()), types.NewFact("pv.phase", string(pv.Status.Phase)), types.NewFact("pv.reclaim", reclaim)},
 			ID:          findingID(r.ID(), "PersistentVolume", "", pv.Name),
 			IDBasis:     &types.ResourceRef{Kind: "PersistentVolume", Namespace: "", Name: pv.Name},
 			RuleID:      r.ID(),

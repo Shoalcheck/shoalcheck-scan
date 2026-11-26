@@ -14,6 +14,9 @@ type workload struct {
 	Namespace string
 	Name      string
 	Replicas  int32 // -1 for DaemonSets (node-bound)
+	// Scheduled is a DaemonSet's status.desiredNumberScheduled: the nodes the controller itself counts as
+	// running one of its pods, after node affinity, taints and tolerations. 0 for the other kinds.
+	Scheduled int32
 	PodSpec   corev1.PodSpec
 	PodLabels map[string]string
 
@@ -64,6 +67,28 @@ func workloads(inv *collect.Inventory, opts Options) []workload {
 	}
 	for _, d := range inv.DaemonSets {
 		add("DaemonSet", d.Namespace, d.Name, -1, d.Spec.Template.Spec, d.Spec.Template.Labels)
+		if n := len(out); n > 0 && out[n-1].Kind == "DaemonSet" && out[n-1].Namespace == d.Namespace && out[n-1].Name == d.Name {
+			out[n-1].Scheduled = d.Status.DesiredNumberScheduled
+		}
+	}
+	// ARGO ROLLOUTS (ENG-11). An inline template makes the Rollout a workload; a workloadRef gives the Deployment it
+	// names the Rollout's replica count, since Argo scales that Deployment to zero and runs its template itself.
+	for _, r := range readRollouts(inv) {
+		if r.refDeployment != "" {
+			for i := range out {
+				if out[i].Kind == "Deployment" && out[i].Namespace == r.namespace && out[i].Name == r.refDeployment {
+					out[i].Replicas = r.replicas
+				}
+			}
+			continue
+		}
+		if r.template == nil {
+			continue
+		}
+		add("Rollout", r.namespace, r.name, r.replicas, r.template.Spec, r.template.Labels)
+		if n := len(out); n > 0 && out[n-1].Kind == "Rollout" && out[n-1].Name == r.name {
+			out[n-1].apiVersion, out[n-1].specPath = "argoproj.io/v1alpha1", ".spec.template.spec"
+		}
 	}
 	return out
 }

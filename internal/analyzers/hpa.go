@@ -39,6 +39,7 @@ func (a HPASanity) Analyze(inv *collect.Inventory) []types.Finding {
 				fmt.Sprintf("HorizontalPodAutoscaler %s/%s has minReplicas==maxReplicas (%d) — it cannot scale", ns, name, min),
 				"An HPA whose min equals max never adds or removes replicas: it is autoscaling in name only, so load spikes have no headroom and the HPA object is misleading.",
 				[]string{fmt.Sprintf("%s/%s: minReplicas=%d maxReplicas=%d (equal — no scaling range)", ns, name, min, max)},
+				[]types.Fact{types.NewFact("hpa.replicas.min", min), types.NewFact("hpa.replicas.max", max)},
 			))
 		case max == 1:
 			out = append(out, a.finding(
@@ -46,6 +47,7 @@ func (a HPASanity) Analyze(inv *collect.Inventory) []types.Finding {
 				fmt.Sprintf("HorizontalPodAutoscaler %s/%s caps at maxReplicas=1 — no scale-out possible", ns, name),
 				"With maxReplicas=1 the HPA can never scale out under load; this is almost always a misconfiguration of an autoscaled workload.",
 				[]string{fmt.Sprintf("%s/%s: maxReplicas=1 (single-replica ceiling)", ns, name)},
+				[]types.Fact{types.NewFact("hpa.replicas.max", max)},
 			))
 		// ONE FACT, ONE FINDING. `k8s.reliability.hpa-pinned-at-max` in internal/rules makes this claim
 		// whenever the autoscaler also published ScalingLimited=True — its own statement that it wanted a
@@ -66,6 +68,7 @@ func (a HPASanity) Analyze(inv *collect.Inventory) []types.Finding {
 					fmt.Sprintf("%s/%s: currentReplicas=%d == maxReplicas=%d", ns, name, cur, max),
 					"status.conditions carries no ScalingLimited=True — commonly because no metrics source is installed, in which case the HPA controller never writes it",
 				},
+				[]types.Fact{types.NewFact("hpa.replicas.current", cur), types.NewFact("hpa.replicas.max", max)},
 			))
 		}
 	}
@@ -87,8 +90,9 @@ func scalingLimited(h *autoscalingv2.HorizontalPodAutoscaler) bool {
 	return false
 }
 
-func (a HPASanity) finding(ruleID, ns, name, title, why string, evidence []string) types.Finding {
+func (a HPASanity) finding(ruleID, ns, name, title, why string, evidence []string, facts []types.Fact) types.Finding {
 	return types.Finding{
+		Facts:             facts,
 		ID:                findingID(ruleID, "HorizontalPodAutoscaler", ns, name),
 		IDBasis:           &types.ResourceRef{Kind: "HorizontalPodAutoscaler", Namespace: ns, Name: name},
 		RuleID:            ruleID,

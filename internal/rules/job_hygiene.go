@@ -88,6 +88,7 @@ func (r JobNoTTL) Evaluate(inv *collect.Inventory, opts Options) []types.Finding
 			refs = append(refs, types.ResourceRef{Kind: "Job", Namespace: ns, Name: n})
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("jobs.finished", len(names)), types.NewFact("jobs.truncated", inv.JobsTruncated)},
 			ID:          findingID(r.ID(), "Namespace", ns, "jobs-without-ttl"),
 			IDBasis:     &types.ResourceRef{Kind: "Namespace", Namespace: ns, Name: "jobs-without-ttl"},
 			RuleID:      r.ID(),

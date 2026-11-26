@@ -4,8 +4,10 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,12 +58,16 @@ func rsPod(ns, podName, owner, cname, cpu, mem string, labels map[string]string)
 			},
 		},
 		Spec: corev1.PodSpec{
+			NodeName: "n1", // every fixture here has one node, n1; the dollar prices each replica on its own node
 			Containers: []corev1.Container{
 				{Name: cname, Image: "img", Resources: corev1.ResourceRequirements{Requests: reqs}},
 			},
 		},
 	}
 }
+
+// week is the usage record of a Prometheus that holds the week its queries span: the one basis that banks a dollar.
+var week = &types.UsageMethodology{Source: "prometheus", Window: "7d", Confidence: types.UsageConfidenceHigh}
 
 // rsDeploy builds a Deployment with one container requesting cpu/mem.
 func rsDeploy(ns, name string, replicas int32, cname, cpu, mem string) appsv1.Deployment {
@@ -123,7 +129,7 @@ func TestRightsizing_OverprovisionedFlaggedWithDollar(t *testing.T) {
 		usageKey("shop", "api-ccc", "api"): {Namespace: "shop", Pod: "api-ccc", Container: "api", CPUCoresP95: 0.15, MemBytesP95: 390 * 1024 * 1024},
 	}
 
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	if len(fs) != 1 {
 		t.Fatalf("want 1 finding, got %d: %+v", len(fs), fs)
 	}
@@ -176,7 +182,7 @@ func TestRightsizing_WellSizedNotFlagged(t *testing.T) {
 		usageKey("shop", "web-aaa", "web"): {CPUCoresP95: 0.20, MemBytesP95: 230 * 1024 * 1024},
 		usageKey("shop", "web-bbb", "web"): {CPUCoresP95: 0.19, MemBytesP95: 220 * 1024 * 1024},
 	}
-	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage}); len(fs) != 0 {
+	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage, UsageBasis: week}); len(fs) != 0 {
 		t.Fatalf("well-sized workload must not be flagged, got %d: %+v", len(fs), fs)
 	}
 }
@@ -194,7 +200,7 @@ func TestRightsizing_TrivialGapNotFlagged(t *testing.T) {
 	usage := map[string]prom.ContainerUsage{
 		usageKey("shop", "tiny-aaa", "tiny"): {CPUCoresP95: 0.10, MemBytesP95: 100 * 1024 * 1024},
 	}
-	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage}); len(fs) != 0 {
+	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage, UsageBasis: week}); len(fs) != 0 {
 		t.Fatalf("trivial gap must not be flagged, got %d: %+v", len(fs), fs)
 	}
 }
@@ -227,7 +233,7 @@ func TestRightsizing_UnknownRegionZeroDollar(t *testing.T) {
 	usage := map[string]prom.ContainerUsage{
 		usageKey("shop", "api-aaa", "api"): {CPUCoresP95: 0.18, MemBytesP95: 400 * 1024 * 1024},
 	}
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	if len(fs) != 1 {
 		t.Fatalf("want 1 finding even with unknown region, got %d", len(fs))
 	}
@@ -259,7 +265,7 @@ func TestRightsizing_MemoryFlooredAtObserved7dMax(t *testing.T) {
 		usageKey("shop", "jvm-aaa", "jvm"): {CPUCoresP95: 0.10, CPUCoresMax: 0.15, MemBytesP95: 300 * 1024 * 1024, MemBytesMax: 820 * 1024 * 1024},
 		usageKey("shop", "jvm-bbb", "jvm"): {CPUCoresP95: 0.09, CPUCoresMax: 0.14, MemBytesP95: 280 * 1024 * 1024, MemBytesMax: 800 * 1024 * 1024},
 	}
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageWindow: "7d"})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageWindow: "7d", UsageBasis: week})
 	if len(fs) != 1 {
 		t.Fatalf("want 1 finding, got %d: %+v", len(fs), fs)
 	}
@@ -304,7 +310,7 @@ func TestRightsizing_MemoryNotFlaggedWhenMaxMeetsRequest(t *testing.T) {
 		// CPU is also well-sized so the whole finding should disappear.
 		usageKey("shop", "cache-aaa", "cache"): {CPUCoresP95: 0.10, MemBytesP95: 150 * 1024 * 1024, MemBytesMax: 520 * 1024 * 1024},
 	}
-	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage}); len(fs) != 0 {
+	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage, UsageBasis: week}); len(fs) != 0 {
 		t.Fatalf("memory whose 7d max meets the request must not be flagged, got %d: %+v", len(fs), fs)
 	}
 }
@@ -323,7 +329,7 @@ func TestRightsizing_SingleReplicaLowersConfidence(t *testing.T) {
 	usage := map[string]prom.ContainerUsage{
 		usageKey("shop", "solo-aaa", "solo"): {CPUCoresP95: 0.18, MemBytesP95: 120 * 1024 * 1024},
 	}
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	if len(fs) != 1 {
 		t.Fatalf("want 1 finding, got %d", len(fs))
 	}
@@ -369,7 +375,7 @@ func TestRightsizing_OwnerAttributionPreventsDoubleCount(t *testing.T) {
 		t.Fatalf("api must own exactly [api-aaa], got %v", names)
 	}
 	// And $ for api scales by its declared 1 replica, not 2 (no double-count).
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	for _, f := range fs {
 		if f.AffectedResources[0].Name == "api" {
 			if !strings.Contains(strings.Join(f.Evidence, "\n"), "1 replica") {
@@ -379,9 +385,8 @@ func TestRightsizing_OwnerAttributionPreventsDoubleCount(t *testing.T) {
 	}
 }
 
-// TestRightsizing_DaemonSetScalesByNodeCount: a DaemonSet (Replicas=-1) targeting
-// a nodeSelector subset must scale $ by the number of MATCHING nodes, not the
-// transient matched-pod count. 2 of 3 nodes carry the selector label.
+// TestRightsizing_DaemonSetScalesByNodeCount: a DaemonSet (Replicas=-1) must scale $ by the controller's own
+// count, status.desiredNumberScheduled (2 here), not the transient matched-pod count (ENG-10).
 func TestRightsizing_DaemonSetScalesByNodeCount(t *testing.T) {
 	nodeWith := func(name string, ssd bool) corev1.Node {
 		n := rsNode(name, "eu-central-1", "m6i.xlarge", "4", "16Gi")
@@ -413,6 +418,9 @@ func TestRightsizing_DaemonSetScalesByNodeCount(t *testing.T) {
 						Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")}}}},
 				},
 			}},
+			// The controller's own count: two ssd nodes, one of them tainted against the agent elsewhere would make
+			// it fewer, which only the controller knows (ENG-10).
+			Status: appsv1.DaemonSetStatus{DesiredNumberScheduled: 2},
 		}},
 		// Only one pod currently scraped (the other is mid-rollout / scrape gap).
 		Pods: []corev1.Pod{dsPod("agent-aaa")},
@@ -420,7 +428,7 @@ func TestRightsizing_DaemonSetScalesByNodeCount(t *testing.T) {
 	usage := map[string]prom.ContainerUsage{
 		usageKey("obs", "agent-aaa", "agent"): {CPUCoresP95: 0.10, MemBytesP95: 50 * 1024 * 1024},
 	}
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	if len(fs) != 1 {
 		t.Fatalf("want 1 finding, got %d: %+v", len(fs), fs)
 	}
@@ -429,7 +437,7 @@ func TestRightsizing_DaemonSetScalesByNodeCount(t *testing.T) {
 	if !strings.Contains(ev, "2 replica") {
 		t.Errorf("DaemonSet $ must scale by 2 matching nodes, not the 1 scraped pod:\n%s", ev)
 	}
-	if !strings.Contains(ev, "nodes the DaemonSet schedules onto") {
+	if !strings.Contains(ev, "status.desiredNumberScheduled") {
 		t.Errorf("evidence must state the replica basis is node count:\n%s", ev)
 	}
 }
@@ -451,7 +459,7 @@ func TestRightsizing_DollarIsUpperBoundWithCaveat(t *testing.T) {
 		usageKey("shop", "api-bbb", "api"): {CPUCoresP95: 0.12, MemBytesP95: 380 * 1024 * 1024},
 		usageKey("shop", "api-ccc", "api"): {CPUCoresP95: 0.15, MemBytesP95: 390 * 1024 * 1024},
 	}
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	if len(fs) != 1 {
 		t.Fatalf("want 1 finding, got %d", len(fs))
 	}
@@ -526,7 +534,7 @@ func TestRightsizing_NamesTheWindowItActuallyHad(t *testing.T) {
 	}
 
 	// THE OVER-REACH: a run that really had the seven days still says so.
-	long := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageWindow: "7d"})
+	long := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageWindow: "7d", UsageBasis: week})
 	if len(long) != 1 {
 		t.Fatalf("want 1 finding over the full window, got %d", len(long))
 	}
@@ -535,7 +543,7 @@ func TestRightsizing_NamesTheWindowItActuallyHad(t *testing.T) {
 	}
 
 	// AND THE UNKNOWN WINDOW: no number, because the rule cannot tell how far back it looked.
-	none := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	none := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	if len(none) != 1 {
 		t.Fatalf("want 1 finding with no window, got %d", len(none))
 	}
@@ -565,7 +573,7 @@ func TestRightsizing_ARecommendationIsNeverZero(t *testing.T) {
 		usageKey("waste", "idle-a", "sleeper"): {Namespace: "waste", Pod: "idle-a", Container: "sleeper"},
 		usageKey("waste", "idle-b", "sleeper"): {Namespace: "waste", Pod: "idle-b", Container: "sleeper"},
 	}
-	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage})
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
 	if len(fs) != 1 {
 		t.Fatalf("want 1 finding, got %d", len(fs))
 	}
@@ -579,5 +587,229 @@ func TestRightsizing_ARecommendationIsNeverZero(t *testing.T) {
 	ev := strings.Join(fs[0].Evidence, "\n")
 	if !strings.Contains(ev, "recommend 10m") || !strings.Contains(ev, "reclaim 890m") {
 		t.Errorf("the evidence does not reconcile with the floored recommendation:\n%s", ev)
+	}
+}
+
+// overProvisioned is the shop/api fixture of the headline test with its usage: 3 replicas requesting 1000m CPU
+// and 512Mi, the busiest at 500m CPU — at a 50% autoscaler target — and memory well sized.
+func overProvisioned(nodes ...string) (*collect.Inventory, map[string]prom.ContainerUsage) {
+	inv := &collect.Inventory{
+		Nodes:       []corev1.Node{rsNode("n1", "eu-central-1", "m6i.xlarge", "4", "16Gi")},
+		Deployments: []appsv1.Deployment{rsDeploy("shop", "api", 3, "api", "1000m", "512Mi")},
+	}
+	usage := map[string]prom.ContainerUsage{}
+	for i, name := range []string{"api-aaa", "api-bbb", "api-ccc"} {
+		p := rsPod("shop", name, "api", "api", "1000m", "512Mi", map[string]string{"app": "api"})
+		if i < len(nodes) {
+			p.Spec.NodeName = nodes[i]
+		}
+		inv.Pods = append(inv.Pods, p)
+		usage[usageKey("shop", name, "api")] = prom.ContainerUsage{CPUCoresP95: 0.5, CPUCoresMax: 0.6, MemBytesP95: 400 << 20, MemBytesMax: 410 << 20}
+	}
+	return inv, usage
+}
+
+func hpa(target string, metrics ...autoscalingv2.MetricSpec) autoscalingv2.HorizontalPodAutoscaler {
+	return autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: target, Namespace: "shop"},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: target, APIVersion: "apps/v1"},
+			Metrics:        metrics}}
+}
+
+func utilization(res corev1.ResourceName, pct int32) autoscalingv2.MetricSpec {
+	return autoscalingv2.MetricSpec{Type: autoscalingv2.ResourceMetricSourceType, Resource: &autoscalingv2.ResourceMetricSource{
+		Name: res, Target: autoscalingv2.MetricTarget{Type: autoscalingv2.UtilizationMetricType, AverageUtilization: &pct}}}
+}
+
+// AN AUTOSCALER ON CPU UTILIZATION GOVERNS THE CPU REQUEST (ENG-01). A workload an HPA holds at 50% CPU looks half
+// idle; lowering its request makes the HPA add replicas until it is back at 50%, and saves $0. The same fixture
+// without the HPA is flagged with a dollar — the guard, switched off.
+func TestRightsizing_AnAutoscalerOnUtilizationGovernsTheRequest(t *testing.T) {
+	inv, usage := overProvisioned()
+	opts := Options{Usage: usage, UsageBasis: week}
+	if fs := (Rightsizing{}).Evaluate(inv, opts); len(fs) != 1 || fs[0].DollarImpactMonthly <= 0 {
+		t.Fatalf("without an autoscaler the fixture must be flagged with a dollar; got %+v", fs)
+	}
+	inv.HPAs = []autoscalingv2.HorizontalPodAutoscaler{hpa("api", utilization(corev1.ResourceCPU, 50))}
+	if fs := (Rightsizing{}).Evaluate(inv, opts); len(fs) != 0 {
+		t.Fatalf("an HPA at 50%% CPU holds this workload at 50%%: no CPU saving exists, yet %d finding(s): %v", len(fs), fs[0].Evidence)
+	}
+	if got := RightsizingWithheld(inv, opts); len(got) != 1 || got[0] != "Deployment shop/api (CPU)" {
+		t.Fatalf("withheld = %v, want the workload counted with its dimension", got)
+	}
+
+	// An autoscaler with no metrics scales on CPU at 80%: the API's default governs too.
+	inv.HPAs = []autoscalingv2.HorizontalPodAutoscaler{hpa("api")}
+	if fs := (Rightsizing{}).Evaluate(inv, opts); len(fs) != 0 {
+		t.Fatalf("an HPA with no metrics scales on CPU at 80%%; the request is governed, yet %d finding(s)", len(fs))
+	}
+
+	// A target in absolute units does not move with the request: nothing is governed.
+	v := resource.MustParse("400m")
+	inv.HPAs = []autoscalingv2.HorizontalPodAutoscaler{hpa("api", autoscalingv2.MetricSpec{Type: autoscalingv2.ResourceMetricSourceType,
+		Resource: &autoscalingv2.ResourceMetricSource{Name: corev1.ResourceCPU, Target: autoscalingv2.MetricTarget{
+			Type: autoscalingv2.AverageValueMetricType, AverageValue: &v}}})}
+	if fs := (Rightsizing{}).Evaluate(inv, opts); len(fs) != 1 {
+		t.Fatalf("an HPA on an absolute CPU value does not hold utilization; the request is not governed, got %d findings", len(fs))
+	}
+}
+
+// One dimension governed, the other over-provisioned: the finding offers the other, with no dollar or patch line
+// for the governed one and the reason stated.
+func TestRightsizing_AGovernedDimensionIsWithheldAndTheOtherOffered(t *testing.T) {
+	inv, usage := overProvisioned()
+	for k, u := range usage {
+		u.MemBytesP95, u.MemBytesMax = 100<<20, 110<<20 // 512Mi request, 110Mi max: memory over-provisioned too
+		usage[k] = u
+	}
+	inv.HPAs = []autoscalingv2.HorizontalPodAutoscaler{hpa("api", utilization(corev1.ResourceCPU, 50))}
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
+	if len(fs) != 1 {
+		t.Fatalf("memory is over-provisioned and not governed: want 1 finding, got %d", len(fs))
+	}
+	ev := strings.Join(fs[0].Evidence, "\n")
+	if !strings.Contains(ev, "withheld: CPU — HorizontalPodAutoscaler shop/api scales this Deployment on its CPU utilization (target 50%)") {
+		t.Errorf("the withheld dimension must be stated with its autoscaler:\n%s", ev)
+	}
+	if strings.Contains(fs[0].RemediationYAML, "cpu:") || !strings.Contains(fs[0].RemediationYAML, "memory:") {
+		t.Errorf("the patch must carry the memory line only:\n%s", fs[0].RemediationYAML)
+	}
+	if strings.Contains(ev, "requests 1000m CPU") {
+		t.Errorf("a governed CPU request was offered:\n%s", ev)
+	}
+}
+
+// EACH REPLICA IS PRICED ON ITS OWN NODE (ENG-02). Two pools and a node the table does not know: the dollar is the
+// sum over replicas of that node's price ÷ its allocatable, and the unpriced replica is counted, not guessed.
+func TestRightsizing_EachReplicaIsPricedOnItsOwnNode(t *testing.T) {
+	inv, usage := overProvisioned("n1", "n2", "n3")
+	inv.Nodes = []corev1.Node{
+		rsNode("n1", "eu-central-1", "m6i.xlarge", "4", "16Gi"),
+		rsNode("n2", "eu-central-1", "m6i.2xlarge", "8", "32Gi"),
+		rsNode("n3", "eu-central-1", "no-such-type.large", "4", "16Gi"),
+	}
+	opts := Options{Usage: usage, UsageBasis: week}
+	provider := providerFromNodes(inv.Nodes)
+	price := func(n corev1.Node) float64 {
+		usd, ok := opts.nodeMonthly(provider, collect.RegionOf(n), n.Labels[labelInstanceType], collect.ClassifyCapacityType(provider, n))
+		if !ok {
+			t.Fatalf("%s is not in the price table; the fixture needs two priced pools", n.Labels[labelInstanceType])
+		}
+		return usd
+	}
+	// Reclaim per replica: 1000m - ceil(500m×1.3 = 650m) = 350m. By hand, per replica on its node:
+	want := 0.35/4*price(inv.Nodes[0]) + 0.35/8*price(inv.Nodes[1])
+	fs := Rightsizing{}.Evaluate(inv, opts)
+	if len(fs) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(fs))
+	}
+	if got := fs[0].DollarImpactMonthly; math.Abs(got-want) > 0.01 {
+		t.Fatalf("dollar = %.4f, want %.4f: the replicas on m6i.xlarge and m6i.2xlarge each at their own node's rate", got, want)
+	}
+	if ev := strings.Join(fs[0].Evidence, "\n"); !strings.Contains(ev, "priced 2 of 3 replicas") ||
+		!strings.Contains(ev, "m6i.2xlarge ×1, m6i.xlarge ×1") {
+		t.Errorf("the priced count and the types must be stated:\n%s", ev)
+	}
+}
+
+// ONLY A PROVEN WINDOW BANKS A DOLLAR, AND ONE SAMPLE IS NEVER A P95 (ENG-04). The fleet sample said "instant p95
+// usage" at confidence 0.75 with the dollars banked. A metrics.k8s.io sample, a VPA target, an hour of Prometheus
+// and a usage record nobody recorded each give the candidate at $0, said as unverified.
+func TestRightsizing_OnlyAProvenWindowBanksADollar(t *testing.T) {
+	inv, usage := overProvisioned()
+	for _, c := range []struct {
+		name  string
+		basis *types.UsageMethodology
+		word  string
+	}{
+		{"instant", &types.UsageMethodology{Source: "metrics.k8s.io", Window: "instant", Confidence: types.UsageConfidenceLow}, "one-moment sample"},
+		{"vpa", &types.UsageMethodology{Source: "vpa", Confidence: types.UsageConfidenceLow}, "VPA target"},
+		{"an hour", &types.UsageMethodology{Source: "prometheus", Window: "1h", Confidence: types.UsageConfidenceLow}, "p95"},
+		{"unrecorded", nil, "p95"},
+	} {
+		fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: c.basis})
+		if len(fs) != 1 {
+			t.Fatalf("%s: the candidate must still be offered, got %d findings", c.name, len(fs))
+		}
+		f := fs[0]
+		all := strings.Join(append([]string{f.Title, f.Description, f.RemediationYAML}, f.Evidence...), "\n")
+		if f.DollarImpactMonthly != 0 || !strings.Contains(all, "dollars withheld (basis: unverified)") {
+			t.Errorf("%s: $%.2f banked, or the basis not said unverified:\n%s", c.name, f.DollarImpactMonthly, all)
+		}
+		if !strings.Contains(all, c.word) {
+			t.Errorf("%s: the figure must be called %q:\n%s", c.name, c.word, all)
+		}
+		if c.word != "p95" && strings.Contains(all, "p95") {
+			t.Errorf("%s: \"p95\" said of a figure that is not one:\n%s", c.name, all)
+		}
+		if f.Confidence > 0.5 {
+			t.Errorf("%s: confidence %.2f for a candidate on an unproven basis", c.name, f.Confidence)
+		}
+	}
+	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage, UsageBasis: week}); len(fs) != 1 || fs[0].DollarImpactMonthly == 0 {
+		t.Fatal("a week of Prometheus at high confidence must bank the dollar")
+	}
+}
+
+// A ROLLOUT DOES NOT ERASE THE WEEK (ENG-06). The live pods were created an hour ago by the last deploy; the week
+// before it is in the series of the pods that deploy replaced, which carry the same controller-made names. Their
+// busier p95 decides the recommendation, and the reading says it used them.
+func TestRightsizing_UsageSurvivesARollout(t *testing.T) {
+	inv, _ := overProvisioned()
+	at := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	inv.Meta.StartedAt = at
+	for i := range inv.Pods {
+		inv.Pods[i].Name = []string{"api-7d4f8b9c5d-xk2vq", "api-7d4f8b9c5d-m9wzt", "api-7d4f8b9c5d-pq4rl"}[i]
+		inv.Pods[i].CreationTimestamp = metav1.NewTime(at.Add(-time.Hour))
+	}
+	usage := map[string]prom.ContainerUsage{}
+	for _, p := range inv.Pods {
+		usage[usageKey("shop", p.Name, "api")] = prom.ContainerUsage{CPUCoresP95: 0.1, CPUCoresMax: 0.2, MemBytesP95: 400 << 20, MemBytesMax: 410 << 20}
+	}
+	// The replaced ReplicaSet's pods: busier, and gone.
+	for _, n := range []string{"api-5c9b7d6f8h-bbbbb", "api-5c9b7d6f8h-ccccc"} {
+		usage[usageKey("shop", n, "api")] = prom.ContainerUsage{CPUCoresP95: 0.5, CPUCoresMax: 0.6, MemBytesP95: 400 << 20, MemBytesMax: 410 << 20}
+	}
+	// Not this workload's: another Deployment whose name starts the same, and a word the hash alphabet cannot spell.
+	usage[usageKey("shop", "api-gateway-7d4f8b9c5d-xk2vq", "api")] = prom.ContainerUsage{CPUCoresP95: 0.9}
+	usage[usageKey("shop", "api-canary-abcde", "api")] = prom.ContainerUsage{CPUCoresP95: 0.9}
+
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
+	if len(fs) != 1 {
+		t.Fatalf("want one finding, got %d", len(fs))
+	}
+	all := strings.Join(append([]string{fs[0].RemediationYAML}, fs[0].Evidence...), "\n")
+	if !strings.Contains(all, "cpu: 650m") {
+		t.Errorf("the recommendation must rest on the replaced pods' 500m p95 (×1.3 = 650m), not the live 100m:\n%s", all)
+	}
+	if !strings.Contains(all, "2 series from pods of this workload that are no longer running") {
+		t.Errorf("the reading does not say it used the earlier pods:\n%s", all)
+	}
+	if fs[0].DollarImpactMonthly == 0 {
+		t.Error("history that reaches past the rollout must still bank")
+	}
+}
+
+// WITH NO EARLIER SERIES, POD AGE GATES THE DOLLAR (ENG-03). Pods an hour old cannot have seen a daily peak: the
+// candidate is offered at $0 and the reason names their age.
+func TestRightsizing_SeriesYoungerThanADayDoNotBank(t *testing.T) {
+	inv, usage := overProvisioned()
+	at := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	inv.Meta.StartedAt = at
+	for i := range inv.Pods {
+		inv.Pods[i].CreationTimestamp = metav1.NewTime(at.Add(-3 * time.Hour))
+	}
+	fs := Rightsizing{}.Evaluate(inv, Options{Usage: usage, UsageBasis: week})
+	if len(fs) != 1 || fs[0].DollarImpactMonthly != 0 {
+		t.Fatalf("pods three hours old banked a saving: %+v", fs)
+	}
+	if all := strings.Join(fs[0].Evidence, "\n"); !strings.Contains(all, "was created 3 hours before the reading") {
+		t.Errorf("the age is not said:\n%s", all)
+	}
+	for i := range inv.Pods {
+		inv.Pods[i].CreationTimestamp = metav1.NewTime(at.Add(-72 * time.Hour))
+	}
+	if fs := (Rightsizing{}).Evaluate(inv, Options{Usage: usage, UsageBasis: week}); len(fs) != 1 || fs[0].DollarImpactMonthly == 0 {
+		t.Fatal("pods three days old must bank")
 	}
 }

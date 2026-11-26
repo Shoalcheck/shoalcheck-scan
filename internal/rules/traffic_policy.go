@@ -63,6 +63,7 @@ func (r ExternalTrafficPolicyConsequence) Evaluate(inv *collect.Inventory, opts 
 	var out []types.Finding
 	if len(lb) > 0 {
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("traffic.services", len(lb))},
 			ID:          findingID(r.ID(), "Service", "", "loadbalancer-cluster"),
 			IDBasis:     &types.ResourceRef{Kind: "Service", Namespace: "", Name: "loadbalancer-cluster"},
 			RuleID:      r.ID(),
@@ -93,6 +94,7 @@ func (r ExternalTrafficPolicyConsequence) Evaluate(inv *collect.Inventory, opts 
 	}
 	if len(np) > 0 {
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("traffic.services", len(np))},
 			ID:          findingID(r.ID(), "Service", "", "nodeport-local"),
 			IDBasis:     &types.ResourceRef{Kind: "Service", Namespace: "", Name: "nodeport-local"},
 			RuleID:      r.ID(),

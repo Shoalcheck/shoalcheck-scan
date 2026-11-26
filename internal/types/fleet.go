@@ -23,7 +23,7 @@ type FleetReport struct {
 	//
 	// It exists because the alternative is a document that silently shows three clusters when five were
 	// requested. A cluster that could not be reached is not a cluster with no problems, and the reader of the
-	// HTML has no other way to tell the difference — the skip used to be a line on stderr, which nobody keeps.
+	// HTML has no other way to tell the difference; a line on stderr is one nobody keeps.
 	Skipped []SkippedCluster `json:"skipped,omitempty"`
 
 	// Divergence is what the audited clusters DECLARE differently — see divergence.go. Nil below two

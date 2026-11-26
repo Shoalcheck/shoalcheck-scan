@@ -103,11 +103,12 @@ func replicaSetDeploymentName(rsName string) (string, bool) {
 type ownerIndex struct {
 	deployments  map[types2.NamespacedName]*appsv1.Deployment
 	statefulSets map[types2.NamespacedName]*appsv1.StatefulSet
+	rollouts     map[string]rollout // namespace/name (ENG-11)
 }
 
 func newOwnerIndex(inv *collect.Inventory) *ownerIndex {
 	x := &ownerIndex{deployments: map[types2.NamespacedName]*appsv1.Deployment{},
-		statefulSets: map[types2.NamespacedName]*appsv1.StatefulSet{}}
+		statefulSets: map[types2.NamespacedName]*appsv1.StatefulSet{}, rollouts: rolloutIndex(inv)}
 	for i := range inv.Deployments {
 		k := types2.NamespacedName{Namespace: inv.Deployments[i].Namespace, Name: inv.Deployments[i].Name}
 		if x.deployments[k] == nil {
@@ -134,5 +135,19 @@ func (x *ownerIndex) deploymentForReplicaSet(ns, rsName string) *appsv1.Deployme
 
 // chain is ownerChain, by lookup.
 func (x *ownerIndex) chain(pod corev1.Pod) []types.OwnerLink {
-	return chainVia(pod, x.deploymentForReplicaSet)
+	c := chainVia(pod, x.deploymentForReplicaSet)
+	// A ReplicaSet no Deployment owns may be a Rollout's: its name is the Rollout's and the template hash. With a
+	// workloadRef the Deployment it names holds the template, and is the workload (ENG-11).
+	if len(c) == 1 && c[0].Kind == "ReplicaSet" && len(x.rollouts) > 0 {
+		if name, ok := replicaSetDeploymentName(c[0].Name); ok {
+			if r, ok := x.rollouts[pod.Namespace+"/"+name]; ok {
+				head := []types.OwnerLink{{Kind: "Rollout", Name: r.name}}
+				if r.refDeployment != "" {
+					head = append([]types.OwnerLink{{Kind: "Deployment", Name: r.refDeployment}}, head...)
+				}
+				return append(head, c...)
+			}
+		}
+	}
+	return c
 }

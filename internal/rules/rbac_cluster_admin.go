@@ -174,6 +174,7 @@ func (r ClusterAdminServiceAccount) finding(bindingKind, bindingNS, bindingName,
 	}
 
 	return types.Finding{
+		Facts:       []types.Fact{types.NewFact("cluster-admin.subjects", len(sas))},
 		ID:          findingID(r.ID(), bindingKind, bindingNS, bindingName),
 		IDBasis:     &types.ResourceRef{Kind: bindingKind, Namespace: bindingNS, Name: bindingName},
 		RuleID:      r.ID(),

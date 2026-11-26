@@ -109,6 +109,7 @@ func (r NoNetworkPolicy) Evaluate(inv *collect.Inventory, opts Options) []types.
 	// DENIAL GUARD — never assert observed-absence on a list we couldn't read.
 	if !observed(inv, "networkpolicies") {
 		return []types.Finding{{
+			Facts:        []types.Fact{types.NewFact("netpol.namespaces.unassessed", len(workloadCount))},
 			ID:           findingID(r.ID(), "Cluster", "", "networkpolicy-not-assessed"),
 			IDBasis:      &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "networkpolicy-not-assessed"},
 			RuleID:       r.ID(),
@@ -125,6 +126,7 @@ func (r NoNetworkPolicy) Evaluate(inv *collect.Inventory, opts Options) []types.
 			AffectedResources: []types.ResourceRef{{Kind: "Cluster"}},
 			EstimatedEffort:   types.EffortLow, // the "fix" is granting read access + re-running
 			Confidence:        0.0,             // we observed nothing; this is a coverage gap, not a problem we are certain of
+			Abstention:        true,
 			Provenance:        provenance(),
 		}}
 	}
@@ -315,6 +317,7 @@ func (r NoNetworkPolicy) findingFor(ns string, wc int, cni cniPosture) types.Fin
 	}
 
 	return types.Finding{
+		Facts:        netpolFacts(wc, cni.name),
 		ID:           findingID(r.ID(), "Namespace", "", ns),
 		IDBasis:      &types.ResourceRef{Kind: "Namespace", Namespace: "", Name: ns},
 		RuleID:       r.ID(),
@@ -376,4 +379,14 @@ func (r NoNetworkPolicy) findingForCRDAware(ns string, wc int, cni cniPosture, c
 // See deps.go for what belongs in this list.
 func (r NoNetworkPolicy) RequiredKinds() []string {
 	return withWorkloads("networkpolicies", "server-resources")
+}
+
+// netpolFacts are the namespace finding's values: the workloads it runs, the upstream policies it has (none, by
+// construction of the rule) and the CNI named when one was detected.
+func netpolFacts(workloads int, cni string) []types.Fact {
+	fs := []types.Fact{types.NewFact("netpol.workloads", workloads), types.NewFact("netpol.policies", 0)}
+	if cni != "" {
+		fs = append(fs, types.NewFact("netpol.cni", cni))
+	}
+	return fs
 }

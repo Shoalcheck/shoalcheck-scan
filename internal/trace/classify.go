@@ -400,11 +400,11 @@ func nonResource(path string) Request {
 // not be able to smuggle an identifier into a trace people are invited to share — but it DOES classify its
 // method, and that part is load-bearing.
 //
-// It used to hardcode get/read. On any cluster whose API server sits behind a path prefix — Rancher publishes
-// /k8s/clusters/<id>/api/v1/... — nothing is recognised, so every request became a read and the report's
-// "0 object writes" held no matter what the process actually sent. A guarantee that cannot fail is not a
-// guarantee. An unrecognised POST is now a create, an unrecognised write is ClassWrite, and the CI guard
-// trips exactly as it should.
+// Its method is not hardcoded to get/read. On any cluster whose API server sits behind a path prefix — Rancher
+// publishes /k8s/clusters/<id>/api/v1/... — nothing is recognised, so every request would become a read and the
+// report's "0 object writes" would hold no matter what the process actually sent. A guarantee that cannot fail is not
+// a guarantee. An unrecognised POST is a create, an unrecognised write is ClassWrite, and the CI guard trips exactly
+// as it should.
 func unclassified(method string) Request {
 	r := Request{Scope: ScopeNonResource, Resource: "unclassified"}
 	switch strings.ToUpper(method) {

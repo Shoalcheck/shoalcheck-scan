@@ -28,7 +28,7 @@ var Version string
 // internal/history's Gate 0 refuses to compare two readings that do not share it; its history, and the gate that
 // makes it move when the finding set can, are beside rules.EngineVersion. It lives here so that a binary that
 // cannot link the rules can still say which ruleset its release produces readings with.
-const EngineVersion = "0.24.0"
+const EngineVersion = "0.30.0"
 
 // Release is Version, or "dev" for a build that was not given one.
 func Release() string {

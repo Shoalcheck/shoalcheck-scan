@@ -62,6 +62,7 @@ func (r SingleControlPlaneNode) Evaluate(inv *collect.Inventory, opts Options) [
 		return nil
 	}
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("controlplane.nodes", len(inv.Nodes)), types.NewFact("controlplane.node", cp[0])},
 		ID:          findingID(r.ID(), "Node", "", cp[0]),
 		IDBasis:     &types.ResourceRef{Kind: "Node", Namespace: "", Name: cp[0]},
 		RuleID:      r.ID(),
@@ -145,6 +146,7 @@ func (r UnmanagedPod) Evaluate(inv *collect.Inventory, opts Options) []types.Fin
 			refs = append(refs, types.ResourceRef{Kind: "Pod", Namespace: ns, Name: n})
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("unmanaged.pods", len(names))},
 			ID:          findingID(r.ID(), "Namespace", ns, "unmanaged-pods"),
 			IDBasis:     &types.ResourceRef{Kind: "Namespace", Namespace: ns, Name: "unmanaged-pods"},
 			RuleID:      r.ID(),
@@ -261,6 +263,7 @@ func (r PodCoveredByTwoPDBs) Evaluate(inv *collect.Inventory, opts Options) []ty
 			refs = append(refs, types.ResourceRef{Kind: "Pod", Namespace: ns, Name: n})
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("pdb.overlap.pods", len(c.pods)), types.NewFact("pdb.overlap.budgets", len(c.pdbs))},
 			ID:          findingID(r.ID(), "Namespace", ns, strings.Join(c.pdbs, "|")),
 			IDBasis:     &types.ResourceRef{Kind: "Namespace", Namespace: ns, Name: strings.Join(c.pdbs, "|")},
 			RuleID:      r.ID(),

@@ -114,9 +114,14 @@ func TestPillarAssignment_IsStableAndExplicit(t *testing.T) {
 		// Change Preflight because the epic is named "Upgrade Preflight" would be the epic deciding the
 		// pillar. crd-conversion-webhook-unbacked claims a published EndpointSlice state, which is true of
 		// the cluster today and would be true if nobody ever upgraded.
-		wantGroundTruth = 18
+		// GROUND TRUTH 18 -> 19 (2026-11-16): container-oom-killed, the kubelet's own record of the last life.
+		// GROUND TRUTH 19 -> 21 (2026-11-18): webhook-unbacked and apiservice-unavailable, EndpointSlice and
+		// APIService conditions their controllers publish.
+		wantGroundTruth = 21
 		// CHANGE PREFLIGHT 16 -> 17 (2026-10-19): NodeDrainUnmanaged, kubectl drain's own refusal.
-		wantChangePreflight = 17
+		// CHANGE PREFLIGHT 17 -> 19 (2026-11-16): node-drain-duration and node-scale-down-blocked, what stops or
+		// slows the next drain and the next scale-down.
+		wantChangePreflight = 19
 	)
 	if counts[types.PillarGroundTruth] != wantGroundTruth {
 		t.Errorf("Ground Truth has %d rules, expected %d — a rule moved into or out of the pillar the "+

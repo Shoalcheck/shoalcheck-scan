@@ -14,7 +14,7 @@ import (
 // The never-read guard (internal/trace/guard.go) refuses Secrets, but a Secret is not the only place a
 // password lives. An Argo CD Application carries Helm values inline in spec.source.helm.values, a Flux
 // HelmRelease in spec.values, and both repeat them in kubectl's last-applied annotation and in status
-// (comparedTo). The collector used to keep every operator object whole, and whole objects go into the
+// (comparedTo). Whole operator objects would go into the
 // capture file a CI gate reads, which ends up in CI artifacts. No analyzer reads any of those fields.
 //
 // So every operator object is pruned when it is read, before it reaches the Inventory, a clone, a capture
@@ -63,7 +63,56 @@ var pruneRules = map[schema.GroupResource]keep{
 	{Group: "cilium.io", Resource: "ciliumclusterwidenetworkpolicies"}: {},
 	{Group: "projectcalico.org", Resource: "networkpolicies"}:          {},
 	{Group: "projectcalico.org", Resource: "globalnetworkpolicies"}:    {},
+
+	// THE RULES' OWN KINDS (Batch 5, docs/engine/read-set.md). Never a webhook's caBundle or URL: a webhook with no
+	// service is "by URL", which is all a rule says of it.
+	{Group: "admissionregistration.k8s.io", Resource: "validatingwebhookconfigurations"}: {"webhooks": webhookKeep},
+	{Group: "admissionregistration.k8s.io", Resource: "mutatingwebhookconfigurations"}:   {"webhooks": webhookKeep},
+	{Group: "apiregistration.k8s.io", Resource: "apiservices"}: {
+		"spec":   keep{"service": keep{"namespace": nil, "name": nil}},
+		"status": keep{"conditions": keep{"type": nil, "status": nil, "reason": nil}},
+	},
+	{Group: "autoscaling.k8s.io", Resource: "verticalpodautoscalers"}: {
+		"spec": keep{"targetRef": keep{"kind": nil, "name": nil}, "updatePolicy": keep{"updateMode": nil}},
+		"status": keep{"recommendation": keep{"containerRecommendations": keep{"containerName": nil, "target": nil,
+			"lowerBound": nil, "upperBound": nil}}},
+	},
+	{Group: "metrics.k8s.io", Resource: "pods"}: {"window": nil, "timestamp": nil,
+		"containers": keep{"name": nil, "usage": keep{"cpu": nil, "memory": nil}}},
+	{Group: "argoproj.io", Resource: "rollouts"}: {
+		"spec": keep{"replicas": nil, "selector": nil, "workloadRef": keep{"kind": nil, "name": nil}, "template": podTemplateKeep,
+			"strategy": keep{"canary": keep{"maxSurge": nil, "maxUnavailable": nil}, "blueGreen": keep{"activeService": nil, "previewService": nil}}},
+		"status": keep{"replicas": nil, "readyReplicas": nil, "availableReplicas": nil, "updatedReplicas": nil,
+			"conditions": keep{"type": nil, "status": nil, "reason": nil}},
+	},
+	{Group: "karpenter.sh", Resource: "nodepools"}: {
+		"spec": keep{"disruption": nil, "limits": nil, "template": keep{"spec": keep{"expireAfter": nil}}},
+	},
+	{Group: "storage.k8s.io", Resource: "csinodes"}: {"spec": keep{"drivers": keep{"name": nil, "allocatable": keep{"count": nil}}}},
+	// A policy's CEL expressions and messages are customer-authored text no rule reads; only its identity stays. A
+	// binding keeps which policy it binds and whether it denies, warns or audits (ENG-14).
+	{Group: "admissionregistration.k8s.io", Resource: "validatingadmissionpolicies"}:       {},
+	{Group: "admissionregistration.k8s.io", Resource: "validatingadmissionpolicybindings"}: {"spec": keep{"policyName": nil, "validationActions": nil}},
 }
+
+// podTemplateKeep is a pod template as the rules read it (ENG-11): its labels and the spec fields rules inspect. An env
+// variable keeps its name only; its value and valueFrom never reach the reading, as dropEnvValues does for the kinds
+// read typed.
+var containerKeep = keep{"name": nil, "image": nil, "resources": nil, "ports": nil, "readinessProbe": nil, "livenessProbe": nil,
+	"startupProbe": nil, "securityContext": nil, "volumeMounts": nil, "lifecycle": nil, "env": keep{"name": nil}}
+
+var podTemplateKeep = keep{
+	"metadata": keep{"labels": nil},
+	"spec": keep{"containers": containerKeep, "initContainers": containerKeep, "volumes": keep{"name": nil, "persistentVolumeClaim": nil,
+		"emptyDir": nil, "hostPath": nil}, "affinity": nil, "nodeSelector": nil, "tolerations": nil, "topologySpreadConstraints": nil,
+		"priorityClassName": nil, "securityContext": nil, "serviceAccountName": nil, "automountServiceAccountToken": nil,
+		"terminationGracePeriodSeconds": nil, "hostNetwork": nil, "hostPID": nil, "hostIPC": nil},
+}
+
+// webhookKeep is a webhook as the rules read it: what it is called, what it does on failure, which Service backs it,
+// which requests it intercepts, and how long it may take.
+var webhookKeep = keep{"name": nil, "failurePolicy": nil, "timeoutSeconds": nil, "rules": nil,
+	"clientConfig": keep{"service": keep{"namespace": nil, "name": nil, "port": nil}}}
 
 // HasPruneRule reports whether gr has declared the fields its readers use. A test in internal/analyzers
 // holds every GVR an analyzer requests to having one.

@@ -122,6 +122,7 @@ func (r MissingRequests) Evaluate(inv *collect.Inventory, opts Options) []types.
 		evidence = append(evidence, uncappedNotes...)
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("requests.containers", len(badContainers))},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),

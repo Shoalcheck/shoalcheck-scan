@@ -24,6 +24,8 @@ var pillarByRule = map[string]types.Pillar{
 	"k8s.reliability.node-drain-unmanaged-pod":     types.PillarChangePreflight,
 	"k8s.reliability.node-placement-concentration": types.PillarChangePreflight,
 	"k8s.reliability.node-pinned-volume":           types.PillarChangePreflight,
+	"k8s.reliability.node-drain-duration":          types.PillarChangePreflight,
+	"k8s.cost.node-scale-down-blocked":             types.PillarChangePreflight, // what stops the next scale-down
 	// Change Preflight, like the rest of the drain family: each answers "what will stop your next change",
 	// where the change is losing a node or a zone. Not Ground Truth — the constraint was always there and the
 	// operator declared it; what is new is the arithmetic over it.
@@ -45,6 +47,8 @@ var pillarByRule = map[string]types.Pillar{
 	// ── Ground Truth: what is true right now that no dashboard shows you ─────────────────────
 	// Every one of these rests on a controller's published status.
 	"k8s.reliability.service-no-ready-endpoints": types.PillarGroundTruth, // EndpointSlice ready conditions
+	"k8s.reliability.webhook-unbacked":           types.PillarGroundTruth, // the same EndpointSlice conditions, behind a fail-closed webhook
+	"k8s.reliability.apiservice-unavailable":     types.PillarGroundTruth, // the APIService controller's own Available condition
 	"k8s.reliability.service-endpoints-one-node": types.PillarGroundTruth, // published endpoint node names
 	"k8s.config.pod-selected-but-unpublished":    types.PillarGroundTruth, // slice membership vs selector
 	"k8s.reliability.hpa-pinned-at-max":          types.PillarGroundTruth, // status.currentReplicas + condition
@@ -133,12 +137,15 @@ var pillarByRule = map[string]types.Pillar{
 	"k8s.config.pod-covered-by-two-pdbs":   types.PillarNone,
 	// Phase 1's last rows. Two read STATUS a controller published and take Ground Truth; four read spec
 	// and abstain, by the table's own test.
-	"k8s.reliability.replicas-below-desired":  types.PillarGroundTruth, // status.readyReplicas + observedGeneration
-	"k8s.reliability.container-restart-total": types.PillarGroundTruth, // status.containerStatuses[].restartCount
-	"k8s.config.external-traffic-policy":      types.PillarNone,
-	"k8s.config.cronjob-no-starting-deadline": types.PillarNone,
-	"k8s.rbac.binding-subject-unresolved":     types.PillarNone,
-	"k8s.config.job-no-ttl":                   types.PillarNone,
+	"k8s.reliability.replicas-below-desired":     types.PillarGroundTruth, // status.readyReplicas + observedGeneration
+	"k8s.reliability.container-restart-total":    types.PillarGroundTruth, // status.containerStatuses[].restartCount
+	"k8s.reliability.container-oom-killed":       types.PillarGroundTruth, // status.containerStatuses[].lastState.terminated
+	"k8s.reliability.node-memory-overcommit":     types.PillarNone,        // arithmetic over limits; no observed failure, no change asked about
+	"k8s.reliability.under-provisioned-requests": types.PillarNone,        // usage against a declaration; a risk, not a published status
+	"k8s.config.external-traffic-policy":         types.PillarNone,
+	"k8s.config.cronjob-no-starting-deadline":    types.PillarNone,
+	"k8s.rbac.binding-subject-unresolved":        types.PillarNone,
+	"k8s.config.job-no-ttl":                      types.PillarNone,
 	// The burst arithmetic reads spec ceilings against node allocatable — no controller published the
 	// sum, and nothing has happened yet. It is the Change Preflight question asked of a change the
 	// AUTOSCALER makes rather than the operator.
@@ -178,9 +185,12 @@ var pillarByRule = map[string]types.Pillar{
 	//
 	// Change Preflight is not it either: nothing here is arithmetic about an operation that has not
 	// happened. These are observations of the last seven days.
-	"k8s.observed.alerts-firing":       types.PillarNone,
-	"k8s.observed.cpu-throttled":       types.PillarNone,
-	"k8s.observed.scrape-targets-down": types.PillarNone,
+	"k8s.observed.alerts-firing":        types.PillarNone,
+	"k8s.observed.cpu-throttled":        types.PillarNone,
+	"k8s.observed.scrape-targets-down":  types.PillarNone,
+	"k8s.observed.volume-filling":       types.PillarNone,
+	"k8s.observed.autoscaler-behaviour": types.PillarNone,
+	"k8s.cost.volume-oversized":         types.PillarNone,
 
 	// Posture: present-tense spec facts, and not "what no dashboard shows you" — every admission
 	// controller and every scanner shows a missing runAsNonRoot.

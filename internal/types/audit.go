@@ -65,6 +65,15 @@ type AuditReport struct {
 	// bound to the cluster's fingerprint refused it, because a token's fingerprint matches nothing a shop issued.
 	// Nil on a reading loaded from disk; ChargeIdentity falls back to what the document carries.
 	Identity *ReadingIdentity `json:"-"`
+
+	// THE DIAGRAM TABLES (ENG-35, ENG-36, ENG-38; decision D2). One field per diagram, each optional and additive:
+	// absent means "not computed by this engine version", never "none". Each is capped and says when it was cut.
+	// docs/engine/tables.md.
+	Placement    *PlacementTable   `json:"placement,omitempty"`
+	Images       *ImageTable       `json:"images,omitempty"`
+	NodeVerdicts *NodeVerdictTable `json:"nodeVerdicts,omitempty"`
+	RBACGraph    *RBACGraph        `json:"rbacGraph,omitempty"`
+	Capacity     *CapacityTable    `json:"capacity,omitempty"`
 }
 
 // ReadingIdentity is the un-redacted identity of the cluster a reading is of. See AuditReport.Identity.
@@ -641,6 +650,31 @@ type Methodology struct {
 	// simulated reading kept with --json cannot later be handed to `gate --baseline` or the history and compared
 	// as if the cluster had ever been in that state.
 	Simulation *Simulation `json:"simulation,omitempty"`
+	// Unmodelled is every kind of pod-owning controller this reading does not model, with how many controllers
+	// and pods. Their pods are read and their specs judged once per controller; no workload-level rule (replicas,
+	// budgets, spread, rightsizing) covers them, and without this the silence read as "no problem" (ENG-12).
+	// Kind names and counts only. Nil when every running pod's controller is modelled, and on older readings.
+	Unmodelled []UnmodelledController `json:"unmodelled,omitempty"`
+	// RuleFailures is every rule or stack analyzer that failed inside this reading — a panic recovered — with what
+	// it said. Its findings are missing from this reading, which is not the same as the cluster having none: the
+	// gate exits as an inability, never as a pass (ENG-23). Nil when every rule ran, and on older readings.
+	RuleFailures []RuleFailure `json:"ruleFailures,omitempty"`
+}
+
+// RuleFailure is one rule that did not complete.
+type RuleFailure struct {
+	Rule string `json:"rule"`
+	// Error is what the rule's failure said. It may quote an object's name, so the redactor withholds it.
+	Error string `json:"error"`
+}
+
+// UnmodelledController is one kind of controller this reading does not model as a workload.
+type UnmodelledController struct {
+	// Kind is the controller's kind as the pods' owner references name it: "Rollout", "Cluster", or "ReplicaSet"
+	// for a ReplicaSet no Deployment of this reading owns (Argo Rollouts' are).
+	Kind        string `json:"kind"`
+	Controllers int    `json:"controllers"`
+	Pods        int    `json:"pods"`
 }
 
 // Simulation is what a simulated reading was built from and what it does not account for.

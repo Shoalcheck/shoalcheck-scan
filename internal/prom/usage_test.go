@@ -49,6 +49,9 @@ func usageServer(t *testing.T, cpuP95, cpuMax, memP95, memMax map[string]any) *h
 		w.Header().Set("Content-Type", "application/json")
 		var payload map[string]any
 		switch {
+		case strings.HasPrefix(q, "count by (namespace)"):
+			// No census: these servers predate sharding, and an empty census is one unsharded read.
+			payload = map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []any{}}}
 		case strings.Contains(q, "container_cpu_usage") && strings.Contains(q, "quantile_over_time"):
 			payload = cpuP95
 		case strings.Contains(q, "container_cpu_usage") && strings.Contains(q, "max_over_time"):

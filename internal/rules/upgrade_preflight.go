@@ -165,6 +165,7 @@ func (r DeprecatedAPIServed) Evaluate(inv *collect.Inventory, opts Options) []ty
 
 	earliest := future[0].rem.RemovedIn
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("api.served", len(inv.ServedGroupVersions)), types.NewFact("api.removed.future", len(future)), types.NewFact("api.removed.past", len(past)), types.NewFact("api.removed.earliest", earliest), types.NewFact("api.server-version", inv.Meta.ServerVersion)},
 		ID:          findingID(r.ID(), "Cluster", "", "deprecated-api-served"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "deprecated-api-served"},
 		RuleID:      r.ID(),
@@ -262,6 +263,7 @@ func (r CRDConversionWebhookUnbacked) Evaluate(inv *collect.Inventory, opts Opti
 		"CRDs with conversion strategy None are out of scope and silent — there is no webhook to back")
 
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("crd.webhooks.unbacked", len(unbacked)), types.NewFact("crd.webhooks.unjudged", len(unknown))},
 		ID:          findingID(r.ID(), "Cluster", "", "conversion-webhook-unbacked"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "conversion-webhook-unbacked"},
 		RuleID:      r.ID(),
@@ -399,6 +401,7 @@ func (r NodePoolCannotRoll) Evaluate(inv *collect.Inventory, opts Options) []typ
 		refs = append(refs, types.ResourceRef{Kind: "Node", Name: n})
 	}
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("roll.nodes.blocked", len(names)), types.NewFact("roll.nodes", total), types.NewFact("roll.findings", len(ids))},
 		ID:          findingID(r.ID(), "Cluster", "", "node-pool-cannot-roll"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "node-pool-cannot-roll"},
 		RuleID:      r.ID(),

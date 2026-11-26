@@ -345,12 +345,11 @@ func capacityUnresolved(ar *types.AuditReport) (Line, bool) {
 
 // identifiedDollars is the money line, and its basis is the basis of the dollars in it.
 //
-// IT USED TO BE THE READING'S BASIS, NOT THE FIGURE'S. Whenever the reading had a usage source the line read
-// "prometheus over 6h · list price · upper bound if consolidated" — and on the mesh testbed $42 of the $90 was an
-// instance-family list-price delta, which rests on no measurement and has nothing to consolidate. The usage window
-// is now named only for the dollars that rest on it, with their share when they are not all of it, and "if
-// consolidated" travels with them. A compute discount the reading was given is part of the price, so it is named
-// too.
+// THE BASIS IS THE FIGURE'S, NOT THE READING'S. A line naming the reading's usage source for all of its dollars is
+// wrong when part of them rest on no measurement: an instance-family list-price delta rests on nothing measured and
+// has nothing to consolidate. The usage window is named only for the dollars that rest on it, with their share when
+// they are not all of it, and "if consolidated" travels with them. A compute discount the reading was given is part of
+// the price, so it is named too.
 func identifiedDollars(ar *types.AuditReport, opts Options) (Line, bool) {
 	usd := ar.Summary.EstimatedSavingsUSD
 	if usd <= 0 {

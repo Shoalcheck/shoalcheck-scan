@@ -98,12 +98,10 @@ type grantPattern struct {
 	// resource, subresource. A rule matches the pattern when the RBAC authorizer would allow one of these requests
 	// with one of the verbs — see rbacAllows.
 	//
-	// WHY REQUESTS AND NOT A PATTERN LANGUAGE. The table used to say resource "*" for "this pattern does not care
-	// which", and verbs "*" for "a rule with `*` counts". Read by a matcher, both meant "anything", so `verbs: ["*"]`
-	// on ConfigMaps was impersonation and a role that only READ webhook configurations was writing them (measured
-	// on the engine bench, including kubeadm's own system:kubelet-api-admin on every kubeadm cluster). And a
-	// pattern language that was not the authorizer's missed what the authorizer grants: `*/proxy` is nodes/proxy.
-	// Naming the request and asking the authorizer's question removes both.
+	// WHY REQUESTS AND NOT A PATTERN LANGUAGE. A "*" for "this pattern does not care which", read by a matcher, means
+	// "anything": `verbs: ["*"]` on ConfigMaps would be impersonation, and a role that only READ webhook configurations
+	// would be writing them. And a pattern language that is not the authorizer's misses what the authorizer grants:
+	// `*/proxy` is nodes/proxy. Naming the request and asking the authorizer's question avoids both.
 	targets []grantTarget
 	verbs   []string
 	why     string
@@ -340,6 +338,22 @@ func (r RBACDangerousGrant) Evaluate(inv *collect.Inventory, opts Options) []typ
 		}
 	}
 
+	// IN THE BINDINGS' OWN ORDER, NOT THE API SERVER'S. The evidence names the bindings, and a reading of an unchanged
+	// cluster must say the same thing however the lists arrived (ENG-28).
+	for _, m := range []map[string][]binding{byClusterRole, byRole} {
+		for _, bs := range m {
+			sort.Slice(bs, func(i, j int) bool {
+				if bs[i].kind != bs[j].kind {
+					return bs[i].kind < bs[j].kind
+				}
+				if bs[i].ns != bs[j].ns {
+					return bs[i].ns < bs[j].ns
+				}
+				return bs[i].name < bs[j].name
+			})
+		}
+	}
+
 	var out []types.Finding
 	for _, cr := range inv.ClusterRoles {
 		bs := byClusterRole[cr.Name]
@@ -402,7 +416,10 @@ func (r RBACDangerousGrant) finding(kind, ns, name string, p grantPattern, names
 		sev = p.cluster
 		reach = "cluster-wide"
 	}
+	facts := []types.Fact{types.NewFact("rbac.pattern", p.key), types.NewFact("rbac.bindings", len(bindings)),
+		types.NewFact("rbac.reach", reach), types.NewFact("rbac.names", len(names))}
 	f := types.Finding{
+		Facts:   facts,
 		ID:      findingID(r.ID(), kind+"/"+p.key, ns, name),
 		IDBasis: &types.ResourceRef{Kind: kind + "/" + p.key, Namespace: ns, Name: name},
 		RuleID:  r.ID(), RuleVersion: r.Version(),
@@ -410,10 +427,9 @@ func (r RBACDangerousGrant) finding(kind, ns, name string, p grantPattern, names
 		Severity: sev, Category: types.CategorySecurity,
 		// 1.0: the rule and the binding are both read verbatim. What is uncertain is whether the grant is
 		// intended, which is a question for the reviewer and not a detection confidence.
-		Confidence:      1.0,
-		EstimatedEffort: types.EffortMedium,
-		Description: fmt.Sprintf("%s %s contains a rule permitting %s, and %s name subjects "+
-			"that activate it. The grant reaches %s.", kind, name, p.label, nWord(len(bindings), "binding", "bindings"), reach),
+		Confidence:        1.0,
+		EstimatedEffort:   types.EffortMedium,
+		Description:       grantDescription(kind, name, p.label, facts),
 		WhyItMatters:      p.why,
 		AffectedResources: affectedForGrant(kind, ns, name, bindings),
 		Provenance:        types.Provenance{Collector: "kubernetes", Version: engineVersion},
@@ -663,4 +679,11 @@ func subjectList(subjects []rbacv1.Subject, fallbackNS string, opts Options) str
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// grantDescription is the grant's description, rendered from the facts (M-172): how many bindings activate it and
+// how far it reaches.
+func grantDescription(kind, name, label string, fs []types.Fact) string {
+	return fmt.Sprintf("%s %s contains a rule permitting %s, and %s name subjects that activate it. The grant reaches %s.",
+		kind, name, label, nWord(int(types.FactNum(fs, "rbac.bindings")), "binding", "bindings"), types.FactStr(fs, "rbac.reach"))
 }

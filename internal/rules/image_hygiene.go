@@ -71,6 +71,7 @@ func (r MutableImageTags) Evaluate(inv *collect.Inventory, opts Options) []types
 
 		severity, confidence := calibrateImageOffense(worst)
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("image.references", len(evidence))},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),

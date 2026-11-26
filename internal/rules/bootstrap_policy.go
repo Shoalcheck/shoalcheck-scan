@@ -185,7 +185,7 @@ func platformBinding(inv *collect.Inventory, name string, labels map[string]stri
 }
 
 // kubeadmControlPlane reads the mark a live collection set (collect.Inventory.KubeadmControlPlane) and nothing else.
-// It used to read the inventory's pods, which a gate reads AFTER laying a pull request's objects over them — so a
+// It does not read the inventory's pods: a gate reads those AFTER laying a pull request's objects over them, so a
 // change could carry a forged API server pod and pass its own copy of kubeadm's binding (security review of
 // c7a9423b). A reading without the mark — a managed cluster, a refused pod list, an empty cluster, a capture taken
 // before the mark existed — reports the binding, which is the safe side.

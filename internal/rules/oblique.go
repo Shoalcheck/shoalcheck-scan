@@ -69,7 +69,7 @@ func (r ImageDigestDrift) Evaluate(inv *collect.Inventory, opts Options) []types
 	}
 	seen := map[key]*obs{}
 
-	owners := newOwnerIndex(inv) // one lookup per pod, not a walk of every Deployment per pod
+	owners := derived(inv, opts).ownerIndex() // one lookup per pod, not a walk of every Deployment per pod
 	for i := range inv.Pods {
 		p := &inv.Pods[i]
 		if !opts.IncludeSystem && isSystemNamespace(p.Namespace) {
@@ -138,6 +138,7 @@ func (r ImageDigestDrift) Evaluate(inv *collect.Inventory, opts Options) []types
 			"which digest is the newer one is not readable here either — a digest carries no ordering")
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("drift.digests", len(digests)), types.NewFact("drift.pods", len(refs))},
 			ID:          findingID(r.ID(), "Pod", o.ns, o.label+"|"+k.container+"|"+k.image),
 			IDBasis:     &types.ResourceRef{Kind: "Pod", Namespace: o.ns, Name: o.label + "|" + k.container + "|" + k.image},
 			RuleID:      r.ID(),
@@ -309,6 +310,7 @@ func (r NodeVersionSkew) Evaluate(inv *collect.Inventory, opts Options) []types.
 
 	severity := types.SeverityLow
 	windowNote := ""
+	var skew []types.Fact
 	if smaj, smin, ok := minorVersion(inv.Meta.ServerVersion); ok {
 		// THE PUBLISHED WINDOW, AND IT WIDENED AT 1.28. kubelet may be up to three minor versions older
 		// than kube-apiserver from 1.28 onward, and two before that; a kubelet NEWER than the API server
@@ -329,6 +331,7 @@ func (r NodeVersionSkew) Evaluate(inv *collect.Inventory, opts Options) []types.
 		}
 		sort.Strings(behind)
 		sort.Strings(ahead)
+		skew = []types.Fact{types.NewFact("skew.allowed", allowed), types.NewFact("skew.nodes.behind", len(behind)), types.NewFact("skew.nodes.ahead", len(ahead))}
 		evidence = append(evidence, fmt.Sprintf("the API server reports %s, and the published skew window "+
 			"for this server version allows a kubelet up to %s older; a kubelet newer "+
 			"than the API server is outside the window at every version",
@@ -362,6 +365,7 @@ func (r NodeVersionSkew) Evaluate(inv *collect.Inventory, opts Options) []types.
 	}
 
 	return []types.Finding{{
+		Facts:       append([]types.Fact{types.NewFact("skew.minors", len(minors)), types.NewFact("skew.nodes", len(parsed))}, skew...),
 		ID:          findingID(r.ID(), "Node", "", strings.Join(minors, ",")),
 		IDBasis:     &types.ResourceRef{Kind: "Node", Namespace: "", Name: strings.Join(minors, ",")},
 		RuleID:      r.ID(),

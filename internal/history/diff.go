@@ -330,10 +330,9 @@ func Compute(prev, cur *types.AuditReport, deps map[string]Deps) Diff {
 // checked before a single finding is looked at.
 func comparable(prev, cur *types.AuditReport, deps map[string]Deps) Comparability {
 	if deps == nil {
-		// THE CALLER, NOT THE READINGS. This sentence used to read "no record of what each finding rests on
-		// was supplied", which a reader takes as a fact about the two readings — and cmd/shoalcheck-mcp passed
-		// nil for a year, so every comparison it made blamed the data for the caller's omission. The map is
-		// an argument; say whose it is.
+		// THE CALLER, NOT THE READINGS. A sentence saying "no record of what each finding rests on was supplied" reads as a
+		// fact about the two readings, but the map is an argument: a caller that passes nil would blame the data for its own
+		// omission. Say whose it is.
 		return Comparability{Reason: "this caller supplied no rule-dependency map, so a difference between " +
 			"these readings could not be told apart from a difference in what was readable — the readings " +
 			"themselves were not examined"}

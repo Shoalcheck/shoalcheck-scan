@@ -77,3 +77,20 @@ func sortedKinds(k []string) []string {
 	sort.Strings(k)
 	return k
 }
+
+// EvidenceReader is a rule that reads kinds for its evidence only: they enrich what a finding shows and decide no
+// claim — which findings exist, about what, how severe, for how much. They are kept out of RequiredKinds on purpose:
+// a reading without them is still a reading of the rule, and saying otherwise would report it as not evaluated.
+// internal/scale/declared_test.go proves both halves: with only the required and evidence kinds read the findings
+// are identical, and with only the required kinds the claims are.
+type EvidenceReader interface {
+	EvidenceKinds() []string
+}
+
+// EvidenceKinds is r's evidence-only kinds, or none.
+func EvidenceKinds(r Rule) []string {
+	if e, ok := r.(EvidenceReader); ok {
+		return e.EvidenceKinds()
+	}
+	return nil
+}

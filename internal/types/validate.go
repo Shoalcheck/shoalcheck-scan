@@ -137,6 +137,30 @@ func (ar *AuditReport) Validate() error {
 		if f.DollarImpactMonthly > 0 && len(f.Evidence) == 0 {
 			errs = append(errs, fmt.Errorf("finding %s: dollarImpactMonthly=%.2f with no evidence (a billed dollar must cite its basis)", f.ID, f.DollarImpactMonthly))
 		}
+		for _, e := range ValidateFacts(f.Facts) {
+			errs = append(errs, fmt.Errorf("finding %s: %w", f.ID, e))
+		}
+		// The nodes a dollar is declared on add up to the dollar (ENG-08).
+		if len(f.SpendNodes) > 0 {
+			sum := 0.0
+			for _, s := range f.SpendNodes {
+				sum += s.USD
+			}
+			if math.Abs(sum-f.DollarImpactMonthly) > 0.01 {
+				errs = append(errs, fmt.Errorf("finding %s: spendNodes sum to %.2f but dollarImpactMonthly is %.2f", f.ID, sum, f.DollarImpactMonthly))
+			}
+		}
+	}
+	// SAVINGS NEVER EXCEED WHAT THEY ARE SAVINGS OF (ENG-08): the compute findings together claim at most the compute
+	// bill this reading estimated. Checked only where a bill was estimated — an unpriced cluster states no spend.
+	compute := 0.0
+	for _, f := range ar.Findings {
+		if f.SpendKind == SpendCompute {
+			compute += f.DollarImpactMonthly
+		}
+	}
+	if bill := ar.Cluster.EstimatedMonthlySpend - ar.Cluster.StorageMonthlyUSD; bill > 0 && compute > bill+0.01 {
+		errs = append(errs, fmt.Errorf("savings integrity: compute findings claim $%.2f/mo of a $%.2f/mo compute bill", compute, bill))
 	}
 	errs = append(errs, validateCalendar(ar.Calendar)...)
 	d := DeriveSummary(ar.Findings)

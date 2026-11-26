@@ -145,6 +145,7 @@ func (r SharedRWOVolume) Evaluate(inv *collect.Inventory, opts Options) []types.
 			"which arrangement is in front of it")
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("rwo.pods", pods), types.NewFact("rwo.claims", len(shared))},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -332,6 +333,7 @@ func (r AutoscalerFloorBelowBudget) Evaluate(inv *collect.Inventory, opts Option
 			}
 
 			out = append(out, types.Finding{
+				Facts:       []types.Fact{types.NewFact("hpa.min-replicas", floor), types.NewFact("pdb.min-available", required)},
 				ID:          findingID(r.ID(), "HorizontalPodAutoscaler", hpa.Namespace, hpa.Name+"/"+pdb.Name),
 				IDBasis:     &types.ResourceRef{Kind: "HorizontalPodAutoscaler", Namespace: hpa.Namespace, Name: hpa.Name + "/" + pdb.Name},
 				RuleID:      r.ID(),

@@ -108,6 +108,7 @@ func readyIssuing(obj map[string]interface{}) (ready, issuing bool) {
 
 func (a CertManagerExpiry) expired(ns, name, issuerKind, notAfter string) types.Finding {
 	return types.Finding{
+		Facts:        []types.Fact{types.NewFact("cert.not-after", notAfter), types.NewFact("cert.issuer-kind", issuerKind)},
 		ID:           findingID("stack.certmanager.expiring", "Certificate", ns, name),
 		IDBasis:      &types.ResourceRef{Kind: "Certificate", Namespace: ns, Name: name},
 		RuleID:       "stack.certmanager.expiring",
@@ -132,6 +133,7 @@ func (a CertManagerExpiry) expired(ns, name, issuerKind, notAfter string) types.
 
 func (a CertManagerExpiry) expiringSoon(ns, name, issuerKind, notAfter string, daysLeft int) types.Finding {
 	return types.Finding{
+		Facts:        []types.Fact{types.NewFact("cert.not-after", notAfter), types.NewFact("cert.days-left", daysLeft), types.NewFact("cert.window", expiryWindowDays), types.NewFact("cert.issuer-kind", issuerKind)},
 		ID:           findingID("stack.certmanager.expiring", "Certificate", ns, name),
 		IDBasis:      &types.ResourceRef{Kind: "Certificate", Namespace: ns, Name: name},
 		RuleID:       "stack.certmanager.expiring",

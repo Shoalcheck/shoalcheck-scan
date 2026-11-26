@@ -48,8 +48,9 @@ func podTemplates(inv *collect.Inventory, opts Options) []workload {
 	for i := range inv.Jobs {
 		j := &inv.Jobs[i]
 		jobs[j.Namespace+"/"+j.Name] = true
-		if ref := jobControllerRef(j.OwnerReferences); ref != nil && ref.Kind == "CronJob" && cronJobs[j.Namespace+"/"+ref.Name] {
-			continue // the CronJob's template is this Job's spec
+		if ref := jobControllerRef(j.OwnerReferences); ref != nil && ref.Kind == "CronJob" &&
+			(cronJobs[j.Namespace+"/"+ref.Name] || !observed(inv, "cronjobs")) {
+			continue // the CronJob's template is this Job's spec — or the CronJob was not read, and is not this Job
 		}
 		if !keep(j.Namespace) {
 			continue
@@ -97,6 +98,12 @@ func podTemplates(inv *collect.Inventory, opts Options) []workload {
 		if ref.Kind == "ReplicaSet" && deploymentForReplicaSet(inv, p.Namespace, ref.Name) != nil {
 			continue
 		}
+		// A CONTROLLER THIS READING COULD NOT LIST IS NOT ABSENT (ENG-13). With deployments denied, every pod a
+		// Deployment owns looked unowned and was judged as itself — the finding's subject a Pod, its ID changing
+		// at every rollout. Its spec is its controller's, and that controller was not read: nothing is said.
+		if controllerUnread(inv, ref.Kind) {
+			continue
+		}
 		if isCollected(ref.Kind, p.Namespace, ref.Name) {
 			continue
 		}
@@ -109,6 +116,22 @@ func podTemplates(inv *collect.Inventory, opts Options) []workload {
 			PodSpec: p.Spec, PodLabels: p.Labels, apiVersion: "v1", specPath: ".spec"})
 	}
 	return out
+}
+
+// controllerUnread reports whether pods owned by a controller of this kind are owned by something this reading
+// could not list: a ReplicaSet's Deployment, a StatefulSet, a DaemonSet, a Job.
+func controllerUnread(inv *collect.Inventory, kind string) bool {
+	switch kind {
+	case "ReplicaSet":
+		return !observed(inv, "deployments")
+	case "StatefulSet":
+		return !observed(inv, "statefulsets")
+	case "DaemonSet":
+		return !observed(inv, "daemonsets")
+	case "Job":
+		return !observed(inv, "jobs")
+	}
+	return false
 }
 
 // jobControllerRef is controllerRef for an object's owner list rather than a pod's.

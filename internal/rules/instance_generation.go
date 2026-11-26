@@ -263,7 +263,23 @@ func (r InstanceGenerationLag) evaluatePool(inv *collect.Inventory, opts Options
 			"Whether the proposed type has capacity in your availability zones is not readable here either.",
 	)
 
+	facts := []types.Fact{types.NewFact("pool.instance-type", p.itype), types.NewFact("pool.region", p.region),
+		types.NewFact("pool.capacity", string(p.capacity)), types.NewFact("pool.nodes", len(p.nodes)),
+		types.NewFact("pool.shape.vcpu", curShape.VCPU), types.NewFact("pool.shape.memory", curShape.MemGiB),
+		types.NewFact("pool.list.node", curMonthly)}
+	if best := func() *genCandidate {
+		if tierA != nil {
+			return tierA
+		}
+		return tierB
+	}(); best != nil {
+		facts = append(facts, types.NewFact("candidate.instance-type", best.itype), types.NewFact("candidate.list.node", best.monthly))
+	}
+	if tierC != nil {
+		facts = append(facts, types.NewFact("arm64.instance-type", tierC.itype), types.NewFact("arm64.list.node", tierC.monthly))
+	}
 	return types.Finding{
+		Facts:       facts,
 		ID:          findingID(r.ID(), "NodePool", p.region, p.itype+"/"+string(p.capacity)),
 		IDBasis:     &types.ResourceRef{Kind: "NodePool", Namespace: p.region, Name: p.itype + "/" + string(p.capacity)},
 		RuleID:      r.ID(),
@@ -279,6 +295,7 @@ func (r InstanceGenerationLag) evaluatePool(inv *collect.Inventory, opts Options
 		Severity:            types.SeverityLow,
 		Category:            types.CategoryCost,
 		DollarImpactMonthly: dollar,
+		SpendNodes:          evenShares(p.nodes, dollar),
 		PriceBasis:          basis,
 		SpendKind:           types.SpendCompute,
 		EstimatedEffort:     types.EffortMedium,
@@ -308,3 +325,15 @@ func nodeRefs(names []string) []types.ResourceRef {
 }
 
 var _ = corev1.Node{} // keep the import honest for readers grepping node handling
+
+// evenShares spreads a pool's dollar over its nodes: each node of one type and capacity carries the same difference.
+func evenShares(nodes []string, dollar float64) []types.SpendShare {
+	if dollar <= 0 || len(nodes) == 0 {
+		return nil
+	}
+	out := make([]types.SpendShare, 0, len(nodes))
+	for _, n := range sortedCopy(nodes) {
+		out = append(out, types.SpendShare{Node: n, USD: dollar / float64(len(nodes))})
+	}
+	return out
+}

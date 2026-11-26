@@ -192,6 +192,34 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "httproutes"]
     verbs: ["get", "list"]
+  # THE RULES' OWN READS (Batch 5, docs/engine/read-set.md). Each is pruned as it is read: no webhook caBundle or
+  # URL, no pod template from a Rollout yet. Without these grants each kind is reported as not read.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["rollouts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list"]
+  # The built-in policy engine: whether a ValidatingAdmissionPolicy can deny requests (ENG-14). A policy is
+  # kept as its name only; its CEL expressions and messages are dropped as they are read.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list"]
   # The monitoring stack — the one component that cannot audit itself.
   # NOTE what is NOT here: Alertmanager's main configuration lives in a Secret
   # (alertmanager-<name>) holding webhook URLs, API keys and integration tokens.

@@ -106,6 +106,7 @@ func (r ProbePortNotDeclared) Evaluate(inv *collect.Inventory, opts Options) []t
 			"listen on a port it never declared — so what is reported here is the spec disagreeing with "+
 			"itself, and nothing about the outcome")
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("declaration.mismatches", len(evidence)-2)},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -206,6 +207,7 @@ func (r DuplicateEnvVar) Evaluate(inv *collect.Inventory, opts Options) []types.
 			"not readable from the spec, and the values are not quoted here because an env value is "+
 			"customer data")
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("declaration.mismatches", len(evidence)-2)},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -314,6 +316,7 @@ func (r ServiceTargetPortUndeclared) Evaluate(inv *collect.Inventory, opts Optio
 			"numeric one need not, because declaring containerPort is optional — so only the named form "+
 			"is judged here")
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("declaration.mismatches", len(evidence)-2)},
 			ID:          findingID(r.ID(), "Service", svc.Namespace, svc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Service", Namespace: svc.Namespace, Name: svc.Name},
 			RuleID:      r.ID(),

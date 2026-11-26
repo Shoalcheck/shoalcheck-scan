@@ -8,6 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/Shoalcheck/shoalcheck-scan/internal/collect"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/types"
@@ -24,6 +26,8 @@ import (
 var bannedFeasibilityPhrases = []string{
 	"will schedule", "will not schedule", "cannot be scheduled",
 	"has a home", "will be placed", "will fit", "safe to remove", "can be removed",
+	// D5 (2026-11-16): priority is stated as a fact; whether the scheduler would preempt is never decided.
+	"fits by preemption", "will be preempted",
 	"guaranteed to", "is able to run", "would run fine", "no impact",
 	// Optimality and cost are the refused half. A phrase that implies either is §4.2 returning under a
 	// different name.
@@ -514,5 +518,208 @@ func TestFeasibilityRules_NeverCarryDollars(t *testing.T) {
 		if f.PriceBasis != "" && f.PriceBasis != types.PriceNotCost {
 			t.Errorf("finding %s declares the price basis %q — this family is not a cost family", f.ID, f.PriceBasis)
 		}
+	}
+}
+
+// A ZONE'S WORK IS CHECKED IN TOTAL, NOT ONLY POD BY POD (ENG-17). Three 1-CPU pods in zone a, and two nodes in
+// zone b with 1.2 CPU free each: every pod has a candidate on its own, and the three together ask 3 CPU of 2.4. The
+// per-pod check said nothing; the aggregate says the zone's work does not fit, with both numbers.
+func TestZoneLoss_TheZonesWorkIsCheckedInTotal(t *testing.T) {
+	node := func(name, zone, cpu string) corev1.Node {
+		return corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"topology.kubernetes.io/zone": zone}},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: qty(cpu), corev1.ResourceMemory: qty("8Gi")},
+				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+	}
+	one := int32(1)
+	pod := func(name, nodeName, cpu string) corev1.Pod {
+		return corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: name + "-0",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: name}}},
+			Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "c",
+				Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: qty(cpu), corev1.ResourceMemory: qty("64Mi")}}}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	}
+	inv := &collect.Inventory{
+		Nodes: []corev1.Node{node("a1", "z-a", "4"), node("b1", "z-b", "2"), node("b2", "z-b", "2")},
+		Pods: []corev1.Pod{pod("w1", "a1", "1"), pod("w2", "a1", "1"), pod("w3", "a1", "1"),
+			pod("fill1", "b1", "800m"), pod("fill2", "b2", "800m")},
+	}
+	for _, n := range []string{"w1", "w2", "w3", "fill1", "fill2"} {
+		inv.StatefulSets = append(inv.StatefulSets, appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: n},
+			Spec: appsv1.StatefulSetSpec{Replicas: &one}})
+	}
+	inv.Meta.Collected = []string{"nodes", "pods", "persistentvolumes", "persistentvolumeclaims"}
+	var zoneA *types.Finding
+	for _, f := range (ZoneLossFeasibility{}).Evaluate(inv, Options{}) {
+		if f.IDBasis != nil && f.IDBasis.Name == "z-a" {
+			zoneA = &f
+		}
+	}
+	if zoneA == nil {
+		t.Fatal("losing zone z-a: 3 CPU asked of 2.4 CPU free, and no finding — the aggregate is not checked")
+	}
+	ev := strings.Join(zoneA.Evidence, "\n")
+	if zoneA.Title != "Losing zone z-a asks for more room than the remaining zones have free" ||
+		!strings.Contains(ev, "asks 3 cpu") || !strings.Contains(ev, "hold 2400m cpu") || !strings.Contains(ev, "no order of placement") {
+		t.Fatalf("the finding must state both totals:\n%s\n%s", zoneA.Title, ev)
+	}
+	for _, s := range []string{zoneA.Title, zoneA.Description, ev} {
+		if strings.Contains(s, "will be preempted") || strings.Contains(s, "fits by preemption") {
+			t.Fatalf("a preemption verdict: %s", s)
+		}
+	}
+}
+
+// THE MODEL IS NEVER STRICTER THAN THE SCHEDULER (ENG-16). Zone a's one pod must go to zone b, whose only node is
+// cordoned and not ready: a pod with a blanket toleration is admitted there, as the scheduler admits it through the
+// two taints; the same pod without it is stranded. A pod's runtime overhead counts toward its fit, and a pod being
+// deleted is not work looking for a home.
+func TestFeasibility_NeverStricterThanTheScheduler(t *testing.T) {
+	one := int32(1)
+	inv := func(tol []corev1.Toleration, overhead, cpu string, deleting bool) *collect.Inventory {
+		b := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "b1", Labels: map[string]string{"topology.kubernetes.io/zone": "z-b"}},
+			Spec: corev1.NodeSpec{Unschedulable: true},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: qty("1"), corev1.ResourceMemory: qty("4Gi")},
+				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}}}
+		a := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "a1", Labels: map[string]string{"topology.kubernetes.io/zone": "z-a"}},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: qty("4"), corev1.ResourceMemory: qty("8Gi")},
+				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+		p := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "w-0",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: "w"}}},
+			Spec: corev1.PodSpec{NodeName: "a1", Tolerations: tol, Containers: []corev1.Container{{Name: "c",
+				Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: qty(cpu), corev1.ResourceMemory: qty("64Mi")}}}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+		if overhead != "" {
+			p.Spec.Overhead = corev1.ResourceList{corev1.ResourceCPU: qty(overhead)}
+		}
+		if deleting {
+			now := metav1.Now()
+			p.DeletionTimestamp = &now
+		}
+		i := &collect.Inventory{Nodes: []corev1.Node{a, b}, Pods: []corev1.Pod{p},
+			StatefulSets: []appsv1.StatefulSet{{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "w"}, Spec: appsv1.StatefulSetSpec{Replicas: &one}}}}
+		i.Meta.Collected = []string{"nodes", "pods", "persistentvolumes", "persistentvolumeclaims"}
+		return i
+	}
+	stranded := func(i *collect.Inventory) bool {
+		for _, f := range (ZoneLossFeasibility{}).Evaluate(i, Options{}) {
+			if f.IDBasis != nil && f.IDBasis.Name == "z-a" {
+				return true
+			}
+		}
+		return false
+	}
+	blanket := []corev1.Toleration{{Operator: corev1.TolerationOpExists}}
+	if stranded(inv(blanket, "", "500m", false)) {
+		t.Error("a pod with a blanket toleration was stranded: the scheduler admits it on a cordoned, not-ready node through their taints")
+	}
+	if !stranded(inv(nil, "", "500m", false)) {
+		t.Error("a pod with no toleration was admitted on a cordoned, not-ready node")
+	}
+	if !stranded(inv(blanket, "600m", "500m", false)) {
+		t.Error("500m plus a 600m runtime overhead was fitted into 1 CPU: the overhead was not counted")
+	}
+	if stranded(inv(nil, "", "500m", true)) {
+		t.Error("a pod being deleted was reported as work with nowhere to go")
+	}
+}
+
+// PRIORITY IS A FACT, NEVER A VERDICT (ENG-34, D5). A high-priority pod with nowhere to go on room alone, on a node
+// whose lower-priority pods hold room: the room they hold is stated, and that the model does not decide preemption.
+func TestFeasibility_LowerPriorityRoomIsStatedNotDecided(t *testing.T) {
+	high, low := int32(1000), int32(0)
+	one := int32(1)
+	node := func(name, zone, cpu string) corev1.Node {
+		return corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"topology.kubernetes.io/zone": zone}},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: qty(cpu), corev1.ResourceMemory: qty("8Gi")},
+				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+	}
+	pod := func(name, nodeName, cpu string, prio *int32) corev1.Pod {
+		return corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: name + "-0",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: name}}},
+			Spec: corev1.PodSpec{NodeName: nodeName, Priority: prio, Containers: []corev1.Container{{Name: "c",
+				Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: qty(cpu), corev1.ResourceMemory: qty("64Mi")}}}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	}
+	inv := &collect.Inventory{
+		Nodes: []corev1.Node{node("a1", "z-a", "4"), node("b1", "z-b", "2")},
+		Pods:  []corev1.Pod{pod("vip", "a1", "1500m", &high), pod("batch", "b1", "1", &low)},
+	}
+	for _, n := range []string{"vip", "batch"} {
+		inv.StatefulSets = append(inv.StatefulSets, appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: n},
+			Spec: appsv1.StatefulSetSpec{Replicas: &one}})
+	}
+	inv.Meta.Collected = []string{"nodes", "pods", "persistentvolumes", "persistentvolumeclaims"}
+	var ev string
+	for _, f := range (ZoneLossFeasibility{}).Evaluate(inv, Options{}) {
+		if f.IDBasis != nil && f.IDBasis.Name == "z-a" {
+			ev = strings.Join(f.Evidence, "\n")
+		}
+	}
+	if !strings.Contains(ev, "app/vip-0: 1 pod of lower priority holds 1 cpu and 64Mi memory on the nodes that admit it") ||
+		!strings.Contains(ev, "this model does not decide whether it would") {
+		t.Fatalf("the lower-priority room is not stated as D5 says:\n%s", ev)
+	}
+}
+
+// A NODE AT ITS CSI DRIVER'S ATTACH LIMIT REFUSES ONE MORE VOLUME OF THAT DRIVER (ENG-44). The pod with a claim has
+// room on the surviving node and nowhere to attach its volume, so losing its node leaves it unplaced, on room rather
+// than on a declaration; without a CSINode the limit is not known and the same pod is placed.
+func TestFeasibility_AnAttachLimitRefusesAVolume(t *testing.T) {
+	one := int32(1)
+	node := func(name string) corev1.Node {
+		return corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"topology.kubernetes.io/zone": "z-a"}},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: qty("8"), corev1.ResourceMemory: qty("32Gi")},
+				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+	}
+	pod := func(name, nodeName, claim string) corev1.Pod {
+		p := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "data", Name: name + "-0",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: name}}},
+			Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "c",
+				Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: qty("100m"), corev1.ResourceMemory: qty("64Mi")}}}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+		if claim != "" {
+			p.Spec.Volumes = []corev1.Volume{{Name: "d", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}}}}
+		}
+		return p
+	}
+	pv := func(name string) corev1.PersistentVolume {
+		return corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "ebs.csi.aws.com"}}}}
+	}
+	pvc := func(name, vol string) corev1.PersistentVolumeClaim {
+		return corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "data", Name: name}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: vol}}
+	}
+	inv := &collect.Inventory{
+		Nodes: []corev1.Node{node("n1"), node("n2")},
+		Pods:  []corev1.Pod{pod("db", "n1", "db-data"), pod("full", "n2", "full-data")},
+		PVs:   []corev1.PersistentVolume{pv("pv-db"), pv("pv-full")},
+		PVCs:  []corev1.PersistentVolumeClaim{pvc("db-data", "pv-db"), pvc("full-data", "pv-full")},
+	}
+	for _, n := range []string{"db", "full"} {
+		inv.StatefulSets = append(inv.StatefulSets, appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Namespace: "data", Name: n},
+			Spec: appsv1.StatefulSetSpec{Replicas: &one}})
+	}
+	inv.Meta.Collected = []string{"nodes", "pods", "persistentvolumes", "persistentvolumeclaims"}
+	// THE MODEL ITSELF: an attach refusal is room, not a declaration, so node-loss reports it in its aggregate and not
+	// per node; what is asserted is that the model no longer places the pod.
+	stranded := func() bool {
+		lost, _ := assess(newPlacementModel(inv), scenario{removed: map[string]bool{"n1": true}}, Options{})
+		for _, d := range lost {
+			if d.pod.Name == "db-0" {
+				return !d.structural
+			}
+		}
+		return false
+	}
+	if stranded() {
+		t.Fatal("without a CSINode the limit is unknown, and the pod was stranded anyway")
+	}
+	csi := unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"drivers": []any{
+		map[string]any{"name": "ebs.csi.aws.com", "allocatable": map[string]any{"count": int64(1)}}}}}}
+	csi.SetName("n2")
+	inv.StackObjects = map[schema.GroupVersionResource][]unstructured.Unstructured{gvrCSINodes: {csi}}
+	inv.Meta.Collected = append(inv.Meta.Collected, crKind(gvrCSINodes))
+	if !stranded() {
+		t.Fatal("n2 is at its EBS attach limit of 1, and the pod with a volume was placed there")
 	}
 }

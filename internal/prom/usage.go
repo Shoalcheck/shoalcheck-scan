@@ -3,6 +3,7 @@ package prom
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -37,43 +38,34 @@ type ContainerUsage struct {
 	Namespace, Pod, Container string
 	CPUCoresP95, CPUCoresMax  float64
 	MemBytesP95, MemBytesMax  float64
+	// Window is the window this container's shard was read over: "7d", or a shorter rung when the backend refused
+	// the longer query for its size (ENG-05). "" is the nominal window, as a provider without shards reports.
+	Window string
 }
 
-// PromQL expressions over a 7d window using standard kube-prometheus-stack
-// (cAdvisor) series names. The {container!="",container!="POD"} matcher drops
-// the per-pod infra "pause" container and unlabeled cgroup roll-ups.
-const (
-	queryCPUP95 = `quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m])[7d:5m])`
-	queryCPUMax = `max_over_time(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m])[7d:5m])`
-	queryMemP95 = `quantile_over_time(0.95, container_memory_working_set_bytes{container!="",container!="POD"}[7d])`
-	queryMemMax = `max_over_time(container_memory_working_set_bytes{container!="",container!="POD"}[7d])`
-)
-
-// Usage7d queries p95 and max CPU (cores) and memory (bytes) per container over
-// a 7-day window and joins the four result vectors by (namespace, pod,
-// container).
-//
-// The returned map is keyed by "namespace/pod/container". A container is
-// included if it appears in at least one of the four vectors; dimensions whose
-// series are absent are left at 0 (see ContainerUsage — 0 means "series
-// absent", never observed-zero). Any underlying query error is propagated.
+// Usage7d is UsageSharded without its coverage report.
 func (c *Client) Usage7d(ctx context.Context) (map[string]ContainerUsage, error) {
-	cpuP95, err := c.Query(ctx, queryCPUP95)
+	u, _, err := c.UsageSharded(ctx)
+	return u, err
+}
+
+// UsageSharded queries p95 and max CPU (cores) and memory (bytes) per container, shard by shard (shard.go), and
+// joins the four result vectors by (namespace, pod, container).
+//
+// The returned map is keyed by "namespace/pod/container". A container is included if it appears in at least one
+// of the four vectors; dimensions whose series are absent are left at 0 (see ContainerUsage — 0 means "series
+// absent", never observed-zero). Each container carries the window its shard was read over. A shard the backend
+// refused at every window is in the report's Unread, not in the map. Any other query error is propagated.
+func (c *Client) UsageSharded(ctx context.Context) (map[string]ContainerUsage, *ShardReport, error) {
+	counts, err := c.census(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("prom: cpu p95: %w", err)
+		return nil, nil, fmt.Errorf("prom: container census: %w", err)
 	}
-	cpuMax, err := c.Query(ctx, queryCPUMax)
-	if err != nil {
-		return nil, fmt.Errorf("prom: cpu max: %w", err)
+	shards := packShards(counts, shardContainers)
+	if len(shards) == 0 {
+		shards = []shard{{}} // no namespace label to shard by: one read, as before
 	}
-	memP95, err := c.Query(ctx, queryMemP95)
-	if err != nil {
-		return nil, fmt.Errorf("prom: mem p95: %w", err)
-	}
-	memMax, err := c.Query(ctx, queryMemMax)
-	if err != nil {
-		return nil, fmt.Errorf("prom: mem max: %w", err)
-	}
+	rep := &ShardReport{Namespaces: len(counts), Shards: len(shards), Shorter: map[string]int{}}
 
 	// Merge into a pointer map so the four vectors accumulate into one entry
 	// per container (Go map values are not addressable).
@@ -82,7 +74,7 @@ func (c *Client) Usage7d(ctx context.Context) (map[string]ContainerUsage, error)
 	// touch returns the entry for a sample's labels, creating it on first use.
 	// It returns nil if the label set lacks the (namespace, pod, container)
 	// triple required to key it.
-	touch := func(m map[string]string) *ContainerUsage {
+	touch := func(m map[string]string, window string) *ContainerUsage {
 		ns, pod, container := containerKey(m)
 		if ns == "" || pod == "" || container == "" {
 			return nil
@@ -90,38 +82,46 @@ func (c *Client) Usage7d(ctx context.Context) (map[string]ContainerUsage, error)
 		key := ns + "/" + pod + "/" + container
 		u := merged[key]
 		if u == nil {
-			u = &ContainerUsage{Namespace: ns, Pod: pod, Container: container}
+			u = &ContainerUsage{Namespace: ns, Pod: pod, Container: container, Window: window}
 			merged[key] = u
 		}
 		return u
 	}
 
-	for _, s := range cpuP95 {
-		if u := touch(s.Metric); u != nil {
-			u.CPUCoresP95 = s.Value
+	for _, sh := range shards {
+		vectors, window, ok, err := c.readShard(ctx, sh)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			rep.Unread = append(rep.Unread, sh.names...)
+			continue
+		}
+		rep.Read += len(sh.names)
+		if window != usageLadder[0] {
+			rep.Shorter[window] += len(sh.names)
+		}
+		set := []func(*ContainerUsage, float64){
+			func(u *ContainerUsage, v float64) { u.CPUCoresP95 = v },
+			func(u *ContainerUsage, v float64) { u.CPUCoresMax = v },
+			func(u *ContainerUsage, v float64) { u.MemBytesP95 = v },
+			func(u *ContainerUsage, v float64) { u.MemBytesMax = v },
+		}
+		for i, rows := range vectors {
+			for _, s := range rows {
+				if u := touch(s.Metric, window); u != nil {
+					set[i](u, s.Value)
+				}
+			}
 		}
 	}
-	for _, s := range cpuMax {
-		if u := touch(s.Metric); u != nil {
-			u.CPUCoresMax = s.Value
-		}
-	}
-	for _, s := range memP95 {
-		if u := touch(s.Metric); u != nil {
-			u.MemBytesP95 = s.Value
-		}
-	}
-	for _, s := range memMax {
-		if u := touch(s.Metric); u != nil {
-			u.MemBytesMax = s.Value
-		}
-	}
+	sort.Strings(rep.Unread)
 
 	out := make(map[string]ContainerUsage, len(merged))
 	for k, u := range merged {
 		out[k] = *u
 	}
-	return out, nil
+	return out, rep, nil
 }
 
 // containerKey extracts (namespace, pod, container) from a metric label set,
@@ -162,6 +162,9 @@ type promProvider struct {
 	// demand opposite behaviour.
 	coverage      time.Duration
 	coverageKnown bool
+
+	// shards is what the last Usage call covered; Methodology states it.
+	shards *ShardReport
 }
 
 // newPromProvider wraps a client with its resolved backend flavour, caveats, and the
@@ -219,8 +222,16 @@ func (c *Client) HistoryCoverage(ctx context.Context) (time.Duration, bool) {
 }
 
 // Usage runs the 7d p95/max queries — the absent-vs-zero map of Usage7d.
+// Shards is what the last Usage call covered (ShardReporter).
+func (p *promProvider) Shards() *ShardReport { return p.shards }
+
+// ShardReporter is a provider whose usage read is sharded and can say what it covered.
+type ShardReporter interface{ Shards() *ShardReport }
+
 func (p *promProvider) Usage(ctx context.Context) (map[string]ContainerUsage, error) {
-	return p.c.Usage7d(ctx)
+	u, rep, err := p.c.UsageSharded(ctx)
+	p.shards = rep
+	return u, err
 }
 
 // cAdvisorCPUMetric is the series HistoryCoverage probes — the same one the CPU
@@ -259,6 +270,7 @@ func (p *promProvider) Methodology() UsageMethodology {
 		}
 	}
 
+	caveats = append(append([]string{}, caveats...), p.shards.Coverage()...)
 	return UsageMethodology{
 		Source:     "prometheus",
 		Backend:    p.backend,

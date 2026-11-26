@@ -42,11 +42,9 @@ const idleLBGraceWindow = 15 * time.Minute
 // false positives on a load-bearing LB are the fastest way to lose trust on a
 // cost report.
 //
-// This used to say "We deliberately do NOT collect Endpoints/EndpointSlices",
-// which stopped being true: they are collected, and servicePublishesEndpoints
-// below reads them as a VETO on the finding. A selectorless Service is still
-// unjudgeable, for a different reason — the endpoints exist but nothing in the
-// cluster says what is supposed to be behind them.
+// Endpoints/EndpointSlices are collected, and servicePublishesEndpoints below reads them as a VETO on the finding. A
+// selectorless Service is still unjudgeable, for a different reason — the endpoints exist but nothing in the cluster
+// says what is supposed to be behind them.
 //
 // The dollar figure is gated on POSITIVE evidence of a managed cloud LB. The
 // node provider heuristic in node_headroom.go defaults any unrecognized node to
@@ -153,6 +151,7 @@ func (r IdleLoadBalancer) Evaluate(inv *collect.Inventory, opts Options) []types
 
 		// Dollar is gated on a confirmed managed cloud LB, an actually provisioned
 		// LB, AND the LB being PUBLIC. Any gap → withhold/marginal, keep the finding.
+		facts := []types.Fact{types.NewFact("lb.pods.matched", 0)}
 		lbClass := loadBalancerClassNote(svc.Spec.LoadBalancerClass)
 		internalReason := internalLBNote(svc)
 		dollar := 0.0
@@ -201,9 +200,8 @@ func (r IdleLoadBalancer) Evaluate(inv *collect.Inventory, opts Options) []types
 			if monthly, ok := opts.prices().LBMonthly(cloudProvider, region); ok {
 				dollar = monthly
 				basis = types.PricePriced
-				evidence = append(evidence, fmt.Sprintf(
-					"%s region %s LB base price about $%.2f/mo (the fixed per-LB base only — excludes capacity-unit / rule / data-processing charges, which are traffic-dependent and not modelled)",
-					cloudProvider, region, monthly))
+				facts = append(facts, types.NewFact("lb.usd", monthly))
+				evidence = append(evidence, lbPriceLine(cloudProvider, region, facts))
 			} else {
 				// UNPRICED, and this is the textbook case: a cost dimension with no rate for the region.
 				basis = types.PriceUnpriced
@@ -216,6 +214,7 @@ func (r IdleLoadBalancer) Evaluate(inv *collect.Inventory, opts Options) []types
 			"snapshot is point-in-time: a Service mid-rollout (pods not yet scheduled) can also read as idle — verify it is truly unused before deleting")
 
 		out = append(out, types.Finding{
+			Facts:       facts,
 			ID:          findingID(r.ID(), "Service", svc.Namespace, svc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Service", Namespace: svc.Namespace, Name: svc.Name},
 			RuleID:      r.ID(),
@@ -372,4 +371,10 @@ func servicePublishesEndpoints(inv *collect.Inventory, ns, name string) bool {
 // See deps.go for what belongs in this list.
 func (r IdleLoadBalancer) RequiredKinds() []string {
 	return []string{"endpointslices", "nodes", "pods", "services"}
+}
+
+// lbPriceLine is the base price's sentence, rendered from the facts (M-172).
+func lbPriceLine(provider, region string, fs []types.Fact) string {
+	return fmt.Sprintf("%s region %s LB base price about $%.2f/mo (the fixed per-LB base only — excludes capacity-unit / "+
+		"rule / data-processing charges, which are traffic-dependent and not modelled)", provider, region, types.FactNum(fs, "lb.usd"))
 }

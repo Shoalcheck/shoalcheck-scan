@@ -35,6 +35,19 @@ type Options struct {
 	// pipeline passes it; a rule that does not have it says "observed" and never a figure.
 	UsageWindow string
 
+	// UsageBasis is where the usage came from: its source, the window it covers and its confidence, as the
+	// usage provider measured them (the same record the methodology prints). A dollar is banked from usage only
+	// when this proves a windowed source over at least a day (usageBanks); nil proves nothing, so a rule given
+	// usage without it states candidates at $0.
+	//
+	// THE SOURCE WAS NOT HERE, so the rules could not tell a week of Prometheus from one metrics.k8s.io sample:
+	// the fleet sample said "instant p95 usage" at confidence 0.75 with the dollars banked (ENG-04).
+	UsageBasis *types.UsageMethodology
+
+	// Derived is the reading's derived indexes, built once and shared by every rule (ENG-22, derived.go). nil
+	// makes each rule build its own, which is what a test that builds Options{} gets.
+	Derived *Derived
+
 	// Prices is the resolved price provider for this run — embedded, cache or live bundle. nil means the
 	// embedded snapshot, which is what every test that builds Options{} gets.
 	//
@@ -123,6 +136,16 @@ func All() []Rule {
 		// document depend on the reader's tooling rather than on the cluster's state.
 		ReplicasBelowDesired{},
 		ContainerRestartTotal{},
+		ContainerOOMKilled{},
+		NodeMemoryOvercommit{},
+		NodeDrainDuration{},
+		NodeScaleDownBlocked{},
+		UnderProvisioned{},
+		VolumeFilling{},
+		VolumeOversized{},
+		AutoscalerBehaviour{},
+		WebhookUnbacked{},
+		APIServiceUnavailable{},
 		ExternalTrafficPolicyConsequence{},
 		CronJobNoStartingDeadline{},
 		DanglingBindingSubject{},

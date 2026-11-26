@@ -177,6 +177,7 @@ func (r DanglingBindingSubject) Evaluate(inv *collect.Inventory, opts Options) [
 			"reading does not have; a name that resolves to nothing is what it reports")
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("ghost.subjects.missing", len(missing)), types.NewFact("ghost.subjects.unjudged", offCluster)},
 			ID:          findingID(r.ID(), b.kind, b.ns, b.name),
 			IDBasis:     &types.ResourceRef{Kind: b.kind, Namespace: b.ns, Name: b.name},
 			RuleID:      r.ID(),

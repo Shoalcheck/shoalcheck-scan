@@ -285,6 +285,13 @@ type Temporal struct {
 	Alerts       []FiringAlert
 	AlertsSeries bool
 
+	// Volumes and Autoscalers (ENG-50, ENG-54): nil when their series could not be read, so a rule says "not read"
+	// rather than "nothing found". A failure here never costs the alerts, throttling and scrape health above.
+	Volumes        map[string]VolumeFill
+	Autoscalers    map[string]AutoscalerHistory
+	VolumesErr     string
+	AutoscalersErr string
+
 	Throttling map[string]Throttling
 	Scrape     ScrapeHealth
 }
@@ -321,6 +328,16 @@ func FetchTemporal(ctx context.Context, c *Client, p Provenance) (*Temporal, err
 		return nil, err
 	}
 	t.Scrape = sh
+	if v, err := c.VolumeFill7d(ctx); err == nil {
+		t.Volumes = v
+	} else {
+		t.VolumesErr = err.Error()
+	}
+	if a, err := c.AutoscalerHistory7d(ctx); err == nil {
+		t.Autoscalers = a
+	} else {
+		t.AutoscalersErr = err.Error()
+	}
 	return t, nil
 }
 

@@ -448,6 +448,7 @@ func nsWithLabels(name string, labels map[string]string) corev1.Namespace {
 
 func TestPSAdmission_AbsentEnforceFlagged(t *testing.T) {
 	inv := &collect.Inventory{
+		Meta:        collect.Meta{Collected: []string{"namespaces", "pods", "deployments", "statefulsets", "daemonsets"}},
 		Deployments: []appsv1.Deployment{deploy("payments", "api", 2, nil)},
 		Namespaces:  []corev1.Namespace{nsWithLabels("payments", map[string]string{"pod-security.kubernetes.io/warn": "baseline"})},
 	}
@@ -466,6 +467,7 @@ func TestPSAdmission_AbsentEnforceFlagged(t *testing.T) {
 
 func TestPSAdmission_PrivilegedEnforceFlagged(t *testing.T) {
 	inv := &collect.Inventory{
+		Meta:        collect.Meta{Collected: []string{"namespaces", "pods", "deployments", "statefulsets", "daemonsets"}},
 		Deployments: []appsv1.Deployment{deploy("payments", "api", 2, nil)},
 		Namespaces:  []corev1.Namespace{nsWithLabels("payments", map[string]string{"pod-security.kubernetes.io/enforce": "privileged"})},
 	}
@@ -477,6 +479,7 @@ func TestPSAdmission_PrivilegedEnforceFlagged(t *testing.T) {
 func TestPSAdmission_BaselineAndRestrictedSuppress(t *testing.T) {
 	for _, profile := range []string{"baseline", "restricted"} {
 		inv := &collect.Inventory{
+			Meta:        collect.Meta{Collected: []string{"namespaces", "pods", "deployments", "statefulsets", "daemonsets"}},
 			Deployments: []appsv1.Deployment{deploy("payments", "api", 2, nil)},
 			Namespaces:  []corev1.Namespace{nsWithLabels("payments", map[string]string{"pod-security.kubernetes.io/enforce": profile})},
 		}
@@ -489,6 +492,7 @@ func TestPSAdmission_BaselineAndRestrictedSuppress(t *testing.T) {
 func TestPSAdmission_OnlyNamespacesWithWorkloads(t *testing.T) {
 	// A namespace with NO workloads (just present in inv.Namespaces) must not flag.
 	inv := &collect.Inventory{
+		Meta:        collect.Meta{Collected: []string{"namespaces", "pods", "deployments", "statefulsets", "daemonsets"}},
 		Deployments: []appsv1.Deployment{deploy("payments", "api", 2, nil)},
 		Namespaces: []corev1.Namespace{
 			nsWithLabels("payments", nil),
@@ -506,6 +510,7 @@ func TestPSAdmission_OnlyNamespacesWithWorkloads(t *testing.T) {
 
 func TestPSAdmission_SystemNamespaceSkipped(t *testing.T) {
 	inv := &collect.Inventory{
+		Meta:        collect.Meta{Collected: []string{"namespaces", "pods", "deployments", "statefulsets", "daemonsets"}},
 		Deployments: []appsv1.Deployment{deploy("kube-system", "sys", 2, nil)},
 		Namespaces:  []corev1.Namespace{nsWithLabels("kube-system", nil)},
 	}
@@ -516,6 +521,7 @@ func TestPSAdmission_SystemNamespaceSkipped(t *testing.T) {
 
 func TestPSAdmission_RemediationStagesEnforcement(t *testing.T) {
 	inv := &collect.Inventory{
+		Meta:        collect.Meta{Collected: []string{"namespaces", "pods", "deployments", "statefulsets", "daemonsets"}},
 		Deployments: []appsv1.Deployment{deploy("payments", "api", 2, nil)},
 		Namespaces:  []corev1.Namespace{nsWithLabels("payments", nil)},
 	}

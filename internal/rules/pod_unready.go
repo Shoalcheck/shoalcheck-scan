@@ -81,7 +81,7 @@ func (r PodNotReady) Evaluate(inv *collect.Inventory, opts Options) []types.Find
 	groups := map[string]*group{}
 	var order []string
 
-	owners := newOwnerIndex(inv) // one lookup per pod, not a walk of every Deployment per pod
+	owners := derived(inv, opts).ownerIndex() // one lookup per pod, not a walk of every Deployment per pod
 	for i := range inv.Pods {
 		p := &inv.Pods[i]
 		if !opts.IncludeSystem && isSystemNamespace(p.Namespace) {
@@ -167,7 +167,12 @@ func (r PodNotReady) Evaluate(inv *collect.Inventory, opts Options) []types.Find
 			refs = append(refs, types.ResourceRef{Kind: "Pod", Namespace: g.ns, Name: name})
 		}
 
+		reasoned := 0
+		for _, n := range g.reasons {
+			reasoned += n
+		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("unready.pods", len(g.pods)), types.NewFact("unready.containers.reasoned", reasoned)},
 			ID:          findingID(r.ID(), "Pod", g.ns, g.label),
 			IDBasis:     &types.ResourceRef{Kind: "Pod", Namespace: g.ns, Name: g.label},
 			RuleID:      r.ID(),

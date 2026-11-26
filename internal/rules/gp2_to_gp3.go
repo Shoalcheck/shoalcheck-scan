@@ -153,7 +153,12 @@ func (r Gp2WhereGp3IsCheaper) Evaluate(inv *collect.Inventory, opts Options) []t
 		affected = append(affected, types.ResourceRef{Kind: "PersistentVolume", Name: v.name})
 	}
 
+	facts := []types.Fact{types.NewFact("gp2.volumes", len(vols)), types.NewFact("gp2.gib", totalGiB), types.NewFact("gp2.iops-crossover.volumes", len(big))}
+	if okGp2 && okGp3 {
+		facts = append(facts, types.NewFact("gp2.rate", gp2Rate), types.NewFact("gp3.rate", gp3Rate))
+	}
 	return []types.Finding{{
+		Facts:       facts,
 		ID:          findingID(r.ID(), "Cluster", "", "gp2"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "gp2"},
 		RuleID:      r.ID(),

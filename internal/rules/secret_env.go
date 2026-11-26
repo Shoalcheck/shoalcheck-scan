@@ -149,6 +149,7 @@ func (r SecretInEnvVar) finding(w workload, refs []secretEnvRef) types.Finding {
 	}
 
 	return types.Finding{
+		Facts:       []types.Fact{types.NewFact("secretenv.values", len(refs)), types.NewFact("secretenv.secrets", len(names)), types.NewFact("secretenv.whole-secret", whole)},
 		ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 		IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 		RuleID:      r.ID(),

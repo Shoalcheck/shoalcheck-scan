@@ -163,6 +163,37 @@ func Report(ar *types.AuditReport) *types.AuditReport {
 		for j, r := range f.AffectedResources {
 			nf.AffectedResources[j] = redactRef(r, rep)
 		}
+		// A FACT IS REDACTED BY ITS KEY'S CLASS (M-172): a number or a word of this product's is kept, a name of the
+		// cluster's is tokenized with the same replacer the sentence beside it uses, and text a user wrote is withheld.
+		if len(f.Facts) > 0 {
+			nf.Facts = make([]types.Fact, len(f.Facts))
+			for j, x := range f.Facts {
+				nx := x
+				if s, ok := x.Value.(string); ok {
+					switch types.FactKeys[x.Key].Class {
+					case types.FactIdentifier:
+						nx.Value = rep(s)
+					case types.FactText:
+						nx.Value = "withheld by redaction"
+					case types.FactSafe:
+					default:
+						nx.Value = "withheld by redaction" // an unregistered key fails Validate; never carried verbatim
+					}
+				}
+				if x.Subject != nil {
+					r := redactRef(*x.Subject, rep)
+					nx.Subject = &r
+				}
+				nx.Basis = prose(x.Basis)
+				nf.Facts[j] = nx
+			}
+		}
+		if len(f.SpendNodes) > 0 {
+			nf.SpendNodes = make([]types.SpendShare, len(f.SpendNodes))
+			for j, s := range f.SpendNodes {
+				nf.SpendNodes[j] = types.SpendShare{Node: rep(s.Node), USD: s.USD}
+			}
+		}
 
 		// IDBASIS CARRIES CUSTOMER TEXT and goes through the SAME function an affected resource does. It is
 		// the three slots a finding's id was hashed from, so a redacted report cannot be used to check an id —
@@ -204,6 +235,15 @@ func Report(ar *types.AuditReport) *types.AuditReport {
 		out.ComplianceAssessment = redactComplianceAssessment(ar.ComplianceAssessment, rep)
 	}
 	out.Methodology.DataSources = repSlice(prose, ar.Methodology.DataSources)
+	redactTables(&out, ar, rep, idents)
+	// A failed rule's message is whatever the failure printed — a panic can quote an object's name. The rule's ID
+	// stays (it is this product's word); the message is withheld, not tokenized, as a label is.
+	if len(ar.Methodology.RuleFailures) > 0 {
+		out.Methodology.RuleFailures = make([]types.RuleFailure, len(ar.Methodology.RuleFailures))
+		for i, f := range ar.Methodology.RuleFailures {
+			out.Methodology.RuleFailures[i] = types.RuleFailure{Rule: f.Rule, Error: "withheld by redaction"}
+		}
+	}
 
 	if len(ar.Highlights) > 0 {
 		out.Highlights = make([]types.Highlight, len(ar.Highlights))
@@ -670,10 +710,8 @@ func gatherIdentifiers(ar *types.AuditReport) map[string]string {
 	if ar.Cluster.Name != "" {
 		m[ar.Cluster.Name] = "cluster"
 	}
-	// THE REGION AND EVERY ZONE. Both fields were already passed through rep() — line 93 and the AZ loop,
-	// whose comment says the zone name "had not been" replaced and now is — and neither string was ever
-	// HARVESTED, so both calls were no-ops that read as fixes. Measured on a live redacted reading of the
-	// testbed: cluster.region "eu-central-1" and three zones "eu-central-1a/b/c", intact.
+	// THE REGION AND EVERY ZONE are HARVESTED as identifiers, not only passed through rep(): a string that is replaced
+	// but never harvested makes the call a no-op that reads as a fix.
 	//
 	// A region is a locating fact: Frankfurt narrows the customer, and on a private cloud a "region" is a
 	// site name. It is the same argument this project used to keep the region out of the support bundle.
@@ -714,6 +752,18 @@ func gatherIdentifiers(ar *types.AuditReport) map[string]string {
 		}
 	}
 	for _, f := range ar.Findings {
+		for _, s := range f.SpendNodes {
+			add("res", s.Node)
+		}
+		for _, x := range f.Facts {
+			if s, ok := x.Value.(string); ok && types.FactKeys[x.Key].Class == types.FactIdentifier {
+				add("res", s)
+			}
+			if x.Subject != nil {
+				add("ns", x.Subject.Namespace)
+				add("res", x.Subject.Name)
+			}
+		}
 		for _, r := range f.AffectedResources {
 			add("ns", r.Namespace)
 			// The RBAC objects Kubernetes itself ships keep their names: see types.KubernetesOwnRBACName.
@@ -837,6 +887,41 @@ func gatherIdentifiers(ar *types.AuditReport) map[string]string {
 			add("file", o.File)
 		}
 	}
+	// THE DIAGRAM TABLES LAST (ENG-35/36/38). Tokens are numbered in the order names are met, so harvesting the
+	// tables first renumbered every finding's tokens; last, they only add the names no finding already carries.
+	if t := ar.Placement; t != nil {
+		for _, r := range t.Rows {
+			add("ns", r.Namespace)
+			add("res", r.Name)
+		}
+	}
+	if t := ar.NodeVerdicts; t != nil {
+		for _, r := range t.Rows {
+			add("res", r.Node)
+		}
+	}
+	if g := ar.RBACGraph; g != nil {
+		for _, e := range g.Edges {
+			add("ns", e.SubjectNamespace)
+			add("ns", e.BindingNamespace)
+			// A ServiceAccount gets the token the prose already gives it (shapes.go: "ServiceAccount ns/name"), so one
+			// account reads as one token in a sentence and in the graph.
+			// A Group or a User gets the token a chain's subject gets (bareSubjectName, with its guards). Before the graph
+			// nothing harvested them, and "names Group team-25" reached a redacted document intact.
+			if e.SubjectKind == "ServiceAccount" {
+				if !types.KubernetesOwnNamespace(e.SubjectNamespace) && e.SubjectName != "default" {
+					add("sa", e.SubjectName)
+				}
+			} else {
+				add("subj", bareSubjectName(e.SubjectKind+"/"+e.SubjectName))
+			}
+			for _, n := range []string{e.BindingName, e.RoleName} {
+				if !types.KubernetesOwnRBACName(n) {
+					add("res", n)
+				}
+			}
+		}
+	}
 	return m
 }
 
@@ -878,10 +963,10 @@ var wordChar = regexp.MustCompile(`[A-Za-z0-9]`)
 
 // buildReplacer swaps whole identifiers, and only whole ones.
 //
-// IT USED TO BE strings.NewReplacer OVER THE RAW KEYS, which replaces any occurrence anywhere. A namespace
-// called "waste" rewrote "wasteful"; a highlight value of "1" rewrote the "1" in "187 more in the document".
-// A redacted reading is the artifact a customer forwards, and one that says `spec.replicas = res-7cf452` has
-// not protected anything — it has lost the arithmetic and looks broken to the person it was made for.
+// Whole identifiers only. A strings.NewReplacer over the raw keys replaces any occurrence anywhere: a namespace called
+// "waste" would rewrite "wasteful", and a highlight value of "1" the "1" in "187 more in the document". A redacted
+// reading is the artifact a customer forwards, and one that says `spec.replicas = res-7cf452` has not protected
+// anything — it has lost the arithmetic and looks broken to the person it was made for.
 //
 // LONGEST KEY FIRST is kept: a name that contains another name must win, or the shorter one tokenizes half
 // of it and the remainder leaks. The boundary test is applied to the WHOLE match, so a longer identifier
@@ -1030,4 +1115,90 @@ func redactRef(r types.ResourceRef, rep func(string) string) types.ResourceRef {
 		nr.OwnerChain[k] = no
 	}
 	return nr
+}
+
+// redactTables rebuilds the diagram tables (ENG-35, ENG-36, ENG-38) with every name of the cluster's tokenized by the
+// replacer the findings use, so a workload in the placement table and the same workload in a finding carry one
+// token. Kinds, verbs, verdicts, finding IDs and instance types are this product's or Kubernetes' vocabulary.
+func redactTables(out *types.AuditReport, ar *types.AuditReport, rep func(string) string, idents map[string]string) {
+	if t := ar.Placement; t != nil {
+		nt := *t
+		nt.Rows = make([]types.PlacementRow, len(t.Rows))
+		for i, r := range t.Rows {
+			nr := r
+			nr.Namespace, nr.Name = rep(r.Namespace), rep(r.Name)
+			nr.Zones = make([]types.ZoneCount, len(r.Zones))
+			for j, z := range r.Zones {
+				nr.Zones[j] = types.ZoneCount{Zone: rep(z.Zone), Pods: z.Pods}
+			}
+			nt.Rows[i] = nr
+		}
+		out.Placement = &nt
+	}
+	if t := ar.Images; t != nil {
+		nt := *t
+		nt.Rows = make([]types.ImageRow, len(t.Rows))
+		// THE IMAGE POLICY OF THE PROSE (shapes.go imageRef), not the identifier map: a repository path becomes one
+		// token with its registry, a tag or a digest is kept, and an official single-name image keeps its name. An
+		// image name in the identifier map would replace every occurrence of that word in every sentence.
+		for i, r := range t.Rows {
+			nr := r
+			path := r.Repository
+			if r.Registry != "docker.io" {
+				path = r.Registry + "/" + r.Repository
+			}
+			if tok := imageRef(path); tok != path {
+				nr.Repository = tok
+				if r.Registry != "docker.io" {
+					nr.Registry = ""
+				}
+			}
+			nt.Rows[i] = nr
+		}
+		out.Images = &nt
+	}
+	if t := ar.NodeVerdicts; t != nil {
+		nt := *t
+		nt.Rows = make([]types.NodeVerdictRow, len(t.Rows))
+		for i, r := range t.Rows {
+			nr := r
+			nr.Node, nr.Zone = rep(r.Node), rep(r.Zone)
+			nt.Rows[i] = nr
+		}
+		out.NodeVerdicts = &nt
+	}
+	if g := ar.RBACGraph; g != nil {
+		ng := *g
+		ng.Edges = make([]types.RBACEdge, len(g.Edges))
+		for i, e := range g.Edges {
+			ne := e
+			// A FIELD THAT IS A NAME IS TOKENIZED WHOLE, never by looking it up in the sentence replacer: the harvest
+			// leaves out a subject too short to replace safely inside prose ("ops"), and a lookup would then leave it
+			// intact here, where it stands alone. The token is the one the replacer would give it, when it has one.
+			named := func(prefix, v string) string {
+				if t, ok := idents[v]; ok {
+					return t
+				}
+				return token(prefix, v)
+			}
+			ne.SubjectNamespace, ne.BindingNamespace = rep(e.SubjectNamespace), rep(e.BindingNamespace)
+			switch {
+			case e.SubjectKind == "ServiceAccount":
+				if !types.KubernetesOwnNamespace(e.SubjectNamespace) && e.SubjectName != "default" {
+					ne.SubjectName = named("sa", e.SubjectName)
+				}
+			case !types.KubernetesOwnRBACName(e.SubjectName) && !strings.HasPrefix(e.SubjectName, "system:") &&
+				!strings.HasPrefix(e.SubjectName, "kubeadm:"):
+				ne.SubjectName = named("subj", e.SubjectName)
+			}
+			if !types.KubernetesOwnRBACName(e.BindingName) {
+				ne.BindingName = named("res", e.BindingName)
+			}
+			if !types.KubernetesOwnRBACName(e.RoleName) {
+				ne.RoleName = named("res", e.RoleName)
+			}
+			ng.Edges[i] = ne
+		}
+		out.RBACGraph = &ng
+	}
 }

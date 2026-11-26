@@ -35,8 +35,7 @@ type ComplianceScore struct {
 	// Checkable and InScope are BUILD facts, not run facts: how many controls in the universe have an
 	// automated check in this build (an evidence rule exists for them), and how many are in scope at all
 	// (Total minus the provider-managed NA rows). The report's coverage sentence is derived from them so the
-	// number it prints cannot drift from the rule set — it used to be typed by hand and read "about 17 of
-	// the ~120" while the code mapped 27. Scored can be lower than Checkable on a run that could not read a
+	// number it prints cannot drift from the rule set. Scored can be lower than Checkable on a run that could not read a
 	// kind a check rests on.
 	Checkable int                   `json:"checkable"`
 	InScope   int                   `json:"inScope"`

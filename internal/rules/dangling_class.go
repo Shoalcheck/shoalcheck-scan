@@ -76,6 +76,7 @@ func (r DanglingStorageClass) Evaluate(inv *collect.Inventory, opts Options) []t
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("dangling.read", len(inv.StorageClasses)), types.NewFact("dangling.target", name)},
 			ID:          findingID(r.ID(), "PersistentVolumeClaim", pvc.Namespace, pvc.Name),
 			IDBasis:     &types.ResourceRef{Kind: "PersistentVolumeClaim", Namespace: pvc.Namespace, Name: pvc.Name},
 			RuleID:      r.ID(),
@@ -147,6 +148,7 @@ func (r DanglingIngressClass) Evaluate(inv *collect.Inventory, opts Options) []t
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("dangling.read", len(inv.IngressClasses)), types.NewFact("dangling.target", name)},
 			ID:          findingID(r.ID(), "Ingress", ing.Namespace, ing.Name),
 			IDBasis:     &types.ResourceRef{Kind: "Ingress", Namespace: ing.Namespace, Name: ing.Name},
 			RuleID:      r.ID(),
@@ -206,6 +208,7 @@ func (r DanglingPriorityClass) Evaluate(inv *collect.Inventory, opts Options) []
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("dangling.read", len(inv.PriorityClasses)), types.NewFact("dangling.target", name)},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -273,6 +276,7 @@ func (r DanglingGoverningService) Evaluate(inv *collect.Inventory, opts Options)
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("dangling.read", countServicesIn(inv, sts.Namespace)), types.NewFact("dangling.target", name)},
 			ID:          findingID(r.ID(), "StatefulSet", sts.Namespace, sts.Name),
 			IDBasis:     &types.ResourceRef{Kind: "StatefulSet", Namespace: sts.Namespace, Name: sts.Name},
 			RuleID:      r.ID(),

@@ -151,9 +151,31 @@ var survivesRedaction = map[string]string{
 	"Assessments.Alerts.FindingRef":        "same",
 
 	// ── methodology: what the RUN did, which is this product's own account of itself ─────────
-	"Methodology.CollectorsRun":  "the literal \"kubernetes\"",
-	"Methodology.CollectedKinds": "collector step names",
-	"Methodology.DeniedKinds":    "collector step names — the KIND is named, never the object",
+	"Methodology.CollectorsRun":     "the literal \"kubernetes\"",
+	"Methodology.CollectedKinds":    "collector step names",
+	"Methodology.RuleFailures.Rule": "a rule's or analyzer's ID — this product's own vocabulary; the message beside it is withheld",
+	"Findings.Facts.Key":            "a key from types.FactKeys — this product's own vocabulary",
+	// The diagram tables (ENG-35/36/38): names are rebuilt by redactTables; these are vocabulary.
+	"Capacity.Rows.Pool":                     "an instance type and a capacity type — the cloud's catalogue words, as Architecture's pools",
+	"NodeVerdicts.Rows.Pool":                 "an instance type — the cloud's catalogue word",
+	"NodeVerdicts.Rows.Verdict":              "one of three words this product writes",
+	"NodeVerdicts.Rows.Findings":             "finding IDs — hashes, as every finding's own ID",
+	"Placement.Rows.Kind":                    "a Kubernetes KIND — public API vocabulary",
+	"RBACGraph.Edges.BindingKind":            "a Kubernetes KIND",
+	"RBACGraph.Edges.RoleKind":               "a Kubernetes KIND",
+	"RBACGraph.Edges.SubjectKind":            "a Kubernetes subject kind",
+	"RBACGraph.Edges.Verbs":                  "Kubernetes verbs, as a role lists them",
+	"Capacity.Rows.UsedBasis":                "prose this product writes about its own usage source, with no name in it",
+	"Images.Rows.Ref":                        "a tag or a digest, kept as the prose's image policy keeps it (shapes.go imageRef): the repository path carries the identity and is tokenized",
+	"RBACGraph.Edges.Finding":                "a finding ID — a hash",
+	"Findings.Facts.Subject.Kind":            "a Kubernetes KIND — public API vocabulary, as on AffectedResources",
+	"Findings.Facts.Subject.OwnerChain.Kind": "same",
+	"Findings.Facts.Subject.OwnerChain.UID":  "an API-server UID, as Findings.AffectedResources.OwnerChain.UID",
+	"Findings.Facts.Unit":                    "a unit from types.FactKeys — this product's own vocabulary",
+	// A controller KIND as a pod's owner reference names it ("Rollout", "Cluster") — a type, never an object. A
+	// custom resource's kind is chosen by whoever wrote the operator, as a CRD's is; the object names are not here.
+	"Methodology.Unmodelled.Kind": "a controller kind from owner references — a type name, never an object's name",
+	"Methodology.DeniedKinds":     "collector step names — the KIND is named, never the object",
 	// One entry per kind read, from the fixed list in collect/volume.go: a resource kind name and two counts.
 	// No object is named, and a count is never an identifier.
 	"Methodology.Volume.ByKind.Kind": "a resource kind name from collect/volume.go's fixed list",

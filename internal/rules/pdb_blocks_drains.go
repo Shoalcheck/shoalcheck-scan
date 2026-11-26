@@ -50,6 +50,7 @@ func (r PDBBlocksDrains) Evaluate(inv *collect.Inventory, opts Options) []types.
 		}
 
 		var evidence []string
+		facts := []types.Fact{types.NewFact("pdb.workloads.matched", len(matched))}
 		if mu := pdb.Spec.MaxUnavailable; mu != nil && intOrStringIsZero(*mu) {
 			evidence = append(evidence, fmt.Sprintf(
 				"PDB %s/%s: maxUnavailable=%s — node drains stall forever on its %s",
@@ -88,6 +89,9 @@ func (r PDBBlocksDrains) Evaluate(inv *collect.Inventory, opts Options) []types.
 				for _, w := range matched {
 					names = append(names, fmt.Sprintf("%s %s/%s", w.Kind, w.Namespace, w.Name))
 				}
+				facts = append(facts, types.NewFact("drain.disruptions.allowed", st.DisruptionsAllowed),
+					types.NewFact("drain.pods.expected", st.ExpectedPods), types.NewFact("pdb.pods.healthy", st.CurrentHealthy),
+					types.NewFact("pdb.pods.desired", st.DesiredHealthy))
 				evidence = append(evidence, fmt.Sprintf(
 					"PDB %s/%s: minAvailable=%s%s over expectedPods=%d (currentHealthy=%d, desiredHealthy=%d) "+
 						"— the eviction API reports disruptionsAllowed=0 across %s",
@@ -104,6 +108,7 @@ func (r PDBBlocksDrains) Evaluate(inv *collect.Inventory, opts Options) []types.
 			affected = append(affected, types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name})
 		}
 		out = append(out, types.Finding{
+			Facts:       facts,
 			ID:          findingID(r.ID(), "PodDisruptionBudget", pdb.Namespace, pdb.Name),
 			IDBasis:     &types.ResourceRef{Kind: "PodDisruptionBudget", Namespace: pdb.Namespace, Name: pdb.Name},
 			RuleID:      r.ID(),

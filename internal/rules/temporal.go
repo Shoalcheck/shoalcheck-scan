@@ -99,6 +99,7 @@ func (r AlertsFiring) Evaluate(inv *collect.Inventory, opts Options) []types.Fin
 			"and a route to a working one look identical from the series")
 
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("alerts.rules", len(t.Alerts)), types.NewFact("alerts.series", total)},
 		ID:          findingID(r.ID(), "Cluster", "", "alerts-firing"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "alerts-firing"},
 		RuleID:      r.ID(),
@@ -226,6 +227,7 @@ func (r ContainerThrottled) Evaluate(inv *collect.Inventory, opts Options) []typ
 			"from that here")
 
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("throttle.containers", len(hits)), types.NewFact("throttle.worst", hits[0].ratio), types.NewFact("throttle.floor", throttleFloor), types.NewFact("throttle.periods.min", minThrottlePeriods), types.NewFact("throttle.unlimited", noLimit)},
 		ID:          findingID(r.ID(), "Cluster", "", "cpu-throttled"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "cpu-throttled"},
 		RuleID:      r.ID(),
@@ -290,6 +292,7 @@ func (r ScrapeTargetsDown) Evaluate(inv *collect.Inventory, opts Options) []type
 	total := t.Scrape.Up + t.Scrape.Down
 
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("scrape.down", t.Scrape.Down), types.NewFact("scrape.up", t.Scrape.Up)},
 		ID:          findingID(r.ID(), "Cluster", "", "scrape-targets-down"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "scrape-targets-down"},
 		RuleID:      r.ID(),

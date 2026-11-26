@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Shoalcheck/shoalcheck-scan/internal/collect"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/types"
@@ -82,6 +83,7 @@ func (c *pssCheck) Evaluate(inv *collect.Inventory, opts Options) []types.Findin
 			severity = c.dynamicSeverity(w)
 		}
 		out = append(out, types.Finding{
+			Facts:             []types.Fact{types.NewFact("pss.containers.flagged", len(evidence)), types.NewFact("pss.containers", len(allContainers(w)))},
 			ID:                findingID(c.id, w.Kind, w.Namespace, w.Name),
 			IDBasis:           &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:            c.id,
@@ -604,7 +606,8 @@ type PodSecurityAdmissionNotEnforced struct{}
 func (PodSecurityAdmissionNotEnforced) ID() string { return "k8s.namespace.pss-admission-not-enforced" }
 
 // 1.1.0 (2026-10-21): a namespace that runs only bare Pods, Jobs or CronJobs runs pods too (podTemplates).
-func (PodSecurityAdmissionNotEnforced) Version() string { return "1.1.0" }
+// 1.2.0 (2026-11-20): says when another admission engine runs and was not read (ENG-14).
+func (PodSecurityAdmissionNotEnforced) Version() string { return "1.2.0" }
 
 const (
 	psaEnforceLabel = "pod-security.kubernetes.io/enforce"
@@ -625,7 +628,7 @@ func (r PodSecurityAdmissionNotEnforced) Evaluate(inv *collect.Inventory, opts O
 	// an empty/partial namespace set as "no PSA labels" and emit a confident
 	// false positive. namespacesCollected reports whether we can trust label
 	// absence; when false, every per-namespace lookup is UNKNOWN, not unset.
-	namespacesCollected := psaNamespacesCollected(inv, len(hasWorkloads))
+	namespacesCollected := observed(inv, "namespaces")
 
 	// Index namespace labels so we can read the PSA labels for each. A namespace
 	// present here was OBSERVED (its label set is authoritative). A namespace
@@ -657,17 +660,94 @@ func (r PodSecurityAdmissionNotEnforced) Evaluate(inv *collect.Inventory, opts O
 	}
 	sort.Strings(flagged) // map iteration is random; findings must be stable
 
+	engines, unread := policyEngines(inv)
 	var out []types.Finding
 	for _, ns := range flagged {
 		// Classify why we're flagging: confirmed gap, or label set unknown.
 		nsUnknown := !namespacesCollected || !observed[ns]
+		var f types.Finding
 		if nsUnknown {
-			out = append(out, r.unknownFinding(ns, namespacesCollected))
-			continue
+			f = r.unknownFinding(ns, namespacesCollected)
+		} else {
+			f = r.gapFinding(ns, labelsByNS[ns])
 		}
-		out = append(out, r.gapFinding(ns, labelsByNS[ns]))
+		out = append(out, withPolicyEngines(f, engines, unread))
 	}
 	return out
+}
+
+// EvidenceKinds — whether another admission engine runs changes what the finding says beside its claim, never the
+// claim: PodSecurity admission is unenforced in the namespace either way (ENG-14).
+func (r PodSecurityAdmissionNotEnforced) EvidenceKinds() []string {
+	return sortedKinds([]string{"customresourcedefinitions", crKind(gvrVAPs), crKind(gvrVAPBindings)})
+}
+
+// policyEngines names the admission engines besides PodSecurity admission that this reading can see, and the reads
+// that would have shown one but were not made.
+//
+// WHAT COUNTS. Kyverno and Gatekeeper are named by their CustomResourceDefinitions' groups, which every install of
+// either carries; a webhook configuration's name is chosen by whoever installed it and would be a guess. A
+// ValidatingAdmissionPolicy counts only through a binding whose validationActions include Deny: a policy with no
+// binding, or bound to warn or audit only, refuses nothing.
+//
+// WHAT IS NOT CLAIMED. Nothing here says the engine enforces anything resembling a Pod Security profile, or covers
+// this namespace. Its policies were not read, and the sentence says exactly that.
+func policyEngines(inv *collect.Inventory) (engines, unread []string) {
+	if observed(inv, "customresourcedefinitions") {
+		kyverno, gatekeeper := false, false
+		for _, c := range inv.CRDs {
+			switch c.Group {
+			case "kyverno.io":
+				kyverno = true
+			case "templates.gatekeeper.sh", "constraints.gatekeeper.sh":
+				gatekeeper = true
+			}
+		}
+		if kyverno {
+			engines = append(engines, "Kyverno (CustomResourceDefinitions in kyverno.io)")
+		}
+		if gatekeeper {
+			engines = append(engines, "OPA Gatekeeper (CustomResourceDefinitions in templates.gatekeeper.sh)")
+		}
+	} else {
+		unread = append(unread, "CustomResourceDefinitions")
+	}
+	if bindings, ok := crObjects(inv, gvrVAPBindings); ok {
+		deny := 0
+		for i := range bindings {
+			actions, _, _ := unstructured.NestedStringSlice(bindings[i].Object, "spec", "validationActions")
+			for _, a := range actions {
+				if a == "Deny" {
+					deny++
+					break
+				}
+			}
+		}
+		if deny > 0 {
+			engines = append(engines, fmt.Sprintf("ValidatingAdmissionPolicy (%d binding%s with validationActions Deny)",
+				deny, plural(deny)))
+		}
+	} else {
+		unread = append(unread, "ValidatingAdmissionPolicyBindings")
+	}
+	return engines, unread
+}
+
+// withPolicyEngines adds what this reading knows about other admission engines to one PodSecurity admission
+// finding, as evidence and as boundaries of this run. Title, severity and the resources it names are untouched.
+func withPolicyEngines(f types.Finding, engines, unread []string) types.Finding {
+	if len(engines) > 0 {
+		list := strings.Join(engines, "; ")
+		f.Evidence = append(f.Evidence, "another admission engine runs in this cluster: "+list+" — its policies were not read")
+		f.ClaimBoundaries = append(f.ClaimBoundaries, "Another admission engine runs in this cluster ("+list+"). Its "+
+			"policies were not read, so pods in this namespace may already be refused by it; this finding is about "+
+			"PodSecurity admission only.")
+	}
+	if len(unread) > 0 {
+		f.ClaimBoundaries = append(f.ClaimBoundaries, "Whether another admission engine runs was not established: "+
+			strings.Join(unread, " and ")+" were not read.")
+	}
+	return f
 }
 
 // gapFinding is the confirmed-gap case: the namespace object was observed and
@@ -683,6 +763,7 @@ func (r PodSecurityAdmissionNotEnforced) gapFinding(ns string, labels map[string
 	}
 
 	return types.Finding{
+		Facts:       []types.Fact{types.NewFact("psa.enforce", enforce), types.NewFact("psa.warn", warn), types.NewFact("psa.audit", audit)},
 		ID:          findingID(r.ID(), "Namespace", "", ns),
 		IDBasis:     &types.ResourceRef{Kind: "Namespace", Namespace: "", Name: ns},
 		RuleID:      r.ID(),
@@ -744,36 +825,9 @@ func (r PodSecurityAdmissionNotEnforced) unknownFinding(ns string, collectedAll 
 		// No RemediationCommand: there is nothing safe to "fix" — the right next
 		// step (re-collect / verify) lives in the Description, not a kubectl patch.
 		Confidence: 0.2, // candidate needing verification — the label was never read
+		Abstention: true,
 		Provenance: provenance(),
 	}
-}
-
-// psaNamespacesCollected reports whether the namespaces LIST succeeded, so a
-// missing label can be trusted as "confirmed absent" rather than "never read".
-// It is false when Collect() recorded a "namespaces: …" failure in Meta.Denied,
-// OR (the cheap fallback for inventories built without Meta — e.g. a partial
-// snapshot or a fixture) when no namespaces were collected while workloads exist.
-// The kind label "namespaces" matches collect.go's step("namespaces", …).
-func psaNamespacesCollected(inv *collect.Inventory, workloadNSCount int) bool {
-	for _, d := range inv.Meta.Denied {
-		if d == "namespaces" || strings.HasPrefix(d, "namespaces:") {
-			return false
-		}
-	}
-	// If Meta explicitly lists "namespaces" as collected, trust it even when the
-	// cluster genuinely has zero namespaces in scope.
-	for _, c := range inv.Meta.Collected {
-		if c == "namespaces" {
-			return true
-		}
-	}
-	// Meta is silent (older inventory / fixture). Treat an empty namespace set as
-	// "not collected" only when workloads exist — otherwise there is nothing to
-	// reconcile and the absence is genuine.
-	if len(inv.Namespaces) == 0 && workloadNSCount > 0 {
-		return false
-	}
-	return true
 }
 
 // valueOrUnset returns the label value or the literal "<unset>" placeholder used

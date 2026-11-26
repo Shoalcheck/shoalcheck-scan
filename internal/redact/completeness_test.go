@@ -127,6 +127,14 @@ func buildSentinelReport() *types.AuditReport {
 			},
 		},
 	}
+	// THE RBAC GRAPH (ENG-38): a ServiceAccount subject is harvested with the "sa" token the prose gives it, and a
+	// Group with the chain subject's "subj".
+	ar.RBACGraph = &types.RBACGraph{Total: 2, Edges: []types.RBACEdge{
+		{SubjectKind: "ServiceAccount", SubjectNamespace: ns, SubjectName: "acme-ledger-writer", BindingKind: "RoleBinding",
+			BindingNamespace: ns, BindingName: "acme-ledger-writer-binding", RoleKind: "Role", RoleName: "acme-ledger-role", Verbs: []string{"get"}},
+		{SubjectKind: "Group", SubjectName: "acme-payments-oncall", BindingKind: "ClusterRoleBinding", BindingName: "acme-oncall-view",
+			RoleKind: "ClusterRole", RoleName: "view", Verbs: []string{"get", "list"}},
+	}}
 	ar.Summary = types.DeriveSummary(ar.Findings)
 	return ar
 }

@@ -103,7 +103,16 @@ func (r CommitmentCandidate) Evaluate(inv *collect.Inventory, opts Options) []ty
 		for _, name := range shown {
 			refs = append(refs, types.ResourceRef{Kind: "Node", Name: name})
 		}
+		facts := []types.Fact{types.NewFact("pool.instance-type", p.itype), types.NewFact("pool.region", p.region),
+			types.NewFact("pool.nodes", len(p.nodes)), types.NewFact("commitment.list.node", list)}
+		if ok1 {
+			facts = append(facts, types.NewFact("commitment.rate.1yr", one))
+		}
+		if ok3 {
+			facts = append(facts, types.NewFact("commitment.rate.3yr", three))
+		}
 		out = append(out, types.Finding{
+			Facts:       facts,
 			ID:          findingID(r.ID(), "NodePool", p.region, p.itype),
 			IDBasis:     &types.ResourceRef{Kind: "NodePool", Namespace: p.region, Name: p.itype},
 			RuleID:      r.ID(),

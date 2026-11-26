@@ -162,6 +162,7 @@ func (r PDBSelectsNoPods) Evaluate(inv *collect.Inventory, opts Options) []types
 				"left in place while its workload sits at zero replicas",
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("drain.pods.expected", pdb.Status.ExpectedPods)},
 			ID:          findingID(r.ID(), "PodDisruptionBudget", pdb.Namespace, pdb.Name),
 			IDBasis:     &types.ResourceRef{Kind: "PodDisruptionBudget", Namespace: pdb.Namespace, Name: pdb.Name},
 			RuleID:      r.ID(),
@@ -306,6 +307,7 @@ func (r TopologyKeyNoNodeCarries) Evaluate(inv *collect.Inventory, opts Options)
 		}
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("placement.offenders", len(offenders)), types.NewFact("placement.nodes", len(inv.Nodes)), types.NewFact("placement.hard", hard)},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -488,6 +490,7 @@ func (r NodeSelectorNoNodeCarries) Evaluate(inv *collect.Inventory, opts Options
 		}
 
 		out = append(out, types.Finding{
+			Facts:       placementFacts(len(reasons), len(inv.Nodes), bound, boundKnown),
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -722,6 +725,7 @@ func (r QuotaBelowCommitted) Evaluate(inv *collect.Inventory, opts Options) []ty
 			fmt.Sprintf("reading taken %s", stamp(readingTime(inv))))
 
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("quota.resources.over", len(lines))},
 			ID:          findingID(r.ID(), "ResourceQuota", q.Namespace, q.Name),
 			IDBasis:     &types.ResourceRef{Kind: "ResourceQuota", Namespace: q.Namespace, Name: q.Name},
 			RuleID:      r.ID(),
@@ -816,6 +820,7 @@ func (r NetPolPeerSelectsNoNamespace) Evaluate(inv *collect.Inventory, opts Opti
 			evidence = append(evidence, cniNote)
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("netpol.peers.dead", len(lines)), types.NewFact("netpol.namespaces", len(inv.Namespaces))},
 			ID:          findingID(r.ID(), "NetworkPolicy", np.Namespace, np.Name),
 			IDBasis:     &types.ResourceRef{Kind: "NetworkPolicy", Namespace: np.Namespace, Name: np.Name},
 			RuleID:      r.ID(),
@@ -882,4 +887,14 @@ func deadPeerLines(np *networkingv1.NetworkPolicy, namespaces []corev1.Namespace
 		}
 	}
 	return out
+}
+
+// placementFacts are a node-selector finding's values: the declarations nothing satisfies, the nodes read and,
+// when the pod list was read, the pods already bound.
+func placementFacts(offenders, nodes, bound int, boundKnown bool) []types.Fact {
+	fs := []types.Fact{types.NewFact("placement.offenders", offenders), types.NewFact("placement.nodes", nodes)}
+	if boundKnown {
+		fs = append(fs, types.NewFact("placement.bound", bound))
+	}
+	return fs
 }

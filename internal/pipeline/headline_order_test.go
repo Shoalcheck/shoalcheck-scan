@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,28 +24,48 @@ func TestHeadline_QuotesTheTraceWhenThereIsOne(t *testing.T) {
 	if got := headline.Select(ar).Trace; !strings.Contains(got, "39 reads") {
 		t.Fatalf("a reading with a trace produced %q", got)
 	}
-	// And the pipeline's own order: the trace attachment must precede the selection in the source, because
-	// nothing else can catch this.
-	src := pipelineSource(t)
-	traceAt := strings.Index(src, "attachSessionTrace(ar,")
-	headlineAt := strings.Index(src, "h := headline.SelectWith(ar,")
-	if traceAt < 0 || headlineAt < 0 {
-		t.Fatal("the pipeline no longer attaches a trace or selects a headline where this test expects")
-	}
-	if headlineAt < traceAt {
-		t.Error("the headline is selected before the session trace is attached, so it will report no trace on every run")
-	}
-	calendarAt := strings.Index(src, "ar.Calendar = buildCalendar(")
-	if calendarAt < 0 || headlineAt < calendarAt {
-		t.Error("the headline is selected before the calendar it quotes")
-	}
-}
-
-func pipelineSource(t *testing.T) string {
-	t.Helper()
-	b, err := os.ReadFile("pipeline.go")
+	// And the pipeline's own order. The assembly derives it from each stage's declared needs (assembly.go), so the
+	// property is that the headline needs the trace and the calendar, directly or through another stage.
+	order, err := orderStages(assemblyStages)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(b)
+	at := map[string]int{}
+	for i, s := range order {
+		at[s.name] = i
+	}
+	for _, before := range []string{"session trace", "calendar"} {
+		if at[before] > at["headline"] {
+			t.Errorf("the headline is selected before the %s it quotes", before)
+		}
+	}
+	if !needsTransitively("headline", "trace") || !needsTransitively("headline", "calendar") {
+		t.Error("the headline stage does not declare the trace and the calendar among what it needs")
+	}
+}
+
+// needsTransitively reports whether stage name needs key, directly or through the stage that provides one of its needs.
+func needsTransitively(name, key string) bool {
+	byName, provider := map[string]stage{}, map[string]string{}
+	for _, s := range assemblyStages {
+		byName[s.name] = s
+		for _, k := range s.provides {
+			provider[k] = s.name
+		}
+	}
+	seen := map[string]bool{}
+	var walk func(string) bool
+	walk = func(n string) bool {
+		if seen[n] {
+			return false
+		}
+		seen[n] = true
+		for _, k := range byName[n].needs {
+			if k == key || walk(provider[k]) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(name)
 }

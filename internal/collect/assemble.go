@@ -173,10 +173,9 @@ func BuildReport(inv *Inventory, findings []types.Finding, clusterName string, d
 	}
 	// THE RUN BASIS IS ALWAYS BUILT, not only when a cluster UID was readable.
 	//
-	// It used to be created only inside `if uid != ""`, which coupled two unrelated facts: whether we could
-	// read kube-system's UID, and which version of OUR price table produced the figures. The second is true
-	// regardless of the first, and a report with no UID still needs its data stamped — otherwise a comparison
-	// against it withholds the dollar delta for the wrong reason and says so in the wrong words.
+	// Whether kube-system's UID was readable and which version of OUR price table produced the figures are two unrelated
+	// facts. The second is true regardless of the first, and a report with no UID still needs its data stamped —
+	// otherwise a comparison against it withholds the dollar delta for the wrong reason and says so in the wrong words.
 	//
 	// An empty ClusterUID inside a present RunBasis is already a documented state: "no comparison may claim
 	// identity" (see the field's own comment), and Gate 0 reads the string, not the pointer.
@@ -204,6 +203,13 @@ func applyComputeDiscount(findings []types.Finding, discount float64) {
 		if findings[i].SpendKind == types.SpendCompute && findings[i].DollarImpactMonthly > 0 {
 			list := findings[i].DollarImpactMonthly
 			findings[i].DollarImpactMonthly *= (1 - discount)
+			if len(findings[i].SpendNodes) > 0 {
+				shares := make([]types.SpendShare, len(findings[i].SpendNodes))
+				for j, s := range findings[i].SpendNodes {
+					shares[j] = types.SpendShare{Node: s.Node, USD: s.USD * (1 - discount)}
+				}
+				findings[i].SpendNodes = shares
+			}
 			// THE EVIDENCE RECONCILES THE FIGURE. The rules price at list, so the arithmetic above this line ends in
 			// the list figure — "-> memory-bound up to $48.34/mo" — while the finding carries the discounted one.
 			// Two figures for one finding with nothing joining them reads as an error in one of them.
@@ -306,11 +312,10 @@ func collected(inv *Inventory, kind string) bool { return Observed(inv, kind) }
 
 // Observed reports whether the collector confirmed a successful list of this step kind.
 //
-// THE ONE IMPLEMENTATION OF THE DENIAL GUARD. It used to be three — this function, rules.observed and
-// analyzers.listSucceeded — each a hand-written copy of the same eight lines, and the project has already
-// paid for that shape twice: three of the four copies once carried an escape hatch treating "mentioned by
-// neither slice" as success, which waved through exactly the fabricated-absence claim the guard exists to
-// stop. A rule you must remember to apply identically in three files is not a rule.
+// THE ONE IMPLEMENTATION OF THE DENIAL GUARD, shared by this function, rules.observed and analyzers.listSucceeded. A
+// rule you must remember to apply identically in three files is not a rule: separate copies drifted and treated
+// "mentioned by neither slice" as success, which waved through exactly the fabricated-absence claim the guard exists
+// to stop.
 //
 // The semantics, unchanged and load-bearing in all three callers:
 //
@@ -792,14 +797,14 @@ func clusterUID(inv *Inventory) string {
 // deniedSourceNote explains which lists did not succeed, and why, WITHOUT carrying the API's own error text
 // into the report.
 //
-// It used to join inv.Meta.Denied verbatim under the words "access denied for". That text publishes two things
-// this document must not: the API server URL and port when the cluster is unreachable, and the authenticated
-// identity on a permission failure ("User \"system:serviceaccount:...\""). Neither is an identifier the
-// redactor gathers, so both survived --redact — in the very section that exists to state the report's limits.
+// It does not join inv.Meta.Denied verbatim: that text publishes the API server URL and port when the cluster is
+// unreachable, and the authenticated identity on a permission failure ("User \"system:serviceaccount:...\""). Neither
+// is an identifier the redactor gathers, so both would survive --redact — in the very section that exists to state the
+// report's limits.
 //
-// It also called every cause "access denied", so a refused TCP connection was reported as a permissions
-// problem, in a document whose own session trace would say zero requests were refused. The cause is now
-// classified, and the raw text stays where it belongs: the local run log.
+// Nor does it call every cause "access denied": a refused TCP connection is not a permissions problem, in a document
+// whose own session trace would say zero requests were refused. The cause is classified, and the raw text stays where
+// it belongs: the local run log.
 // unreadPairs classifies every failed list into (kind, cause) pairs, de-duplicated, in the collector's own
 // order. Same classification the note uses — one call each, no second opinion.
 func unreadPairs(denied []string) []types.UnreadKind {

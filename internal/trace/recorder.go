@@ -233,11 +233,10 @@ func outcomeOf(code int) string {
 	switch {
 	case code >= 200 && code < 300:
 		return "ok"
-	// 401 is a REJECTED CREDENTIAL, and it used to fall through to "other" — the one value in this
-	// vocabulary that cannot be checked against anything. An expired EKS token and a wrong tracker API key
-	// are both common and both diagnostic, and the trace exists to be read against the destination's own
-	// access log. Named after folding internal/tracker's ledger in here silently downgraded it: that
-	// package's own mapping had it and this one did not, and seven tests passed across the change.
+	// 401 is a REJECTED CREDENTIAL and has its own value: falling through to "other" would put it under the one value in
+	// this vocabulary that cannot be checked against anything. An expired EKS token and a wrong tracker API key are both
+	// common and both diagnostic, and the trace exists to be read against the destination's own access log.
+	// internal/tracker's ledger maps it, and this package must map it too.
 	case code == 401:
 		return "unauthorized"
 	case code == 403:

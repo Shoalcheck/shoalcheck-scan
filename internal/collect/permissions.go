@@ -89,6 +89,17 @@ func CollectedResources() []ResourceAccess {
 		{"monitoring.coreos.com", "podmonitors", readOnly, true},
 		{"monitoring.coreos.com", "alertmanagerconfigs", readOnly, true},
 		{"monitoring.coreos.com", "prometheuses", readOnly, true},
+		// The rules' own reads (Batch 5, docs/engine/read-set.md): the same opportunistic path, pruned as read.
+		{"admissionregistration.k8s.io", "validatingwebhookconfigurations", readOnly, true},
+		{"admissionregistration.k8s.io", "mutatingwebhookconfigurations", readOnly, true},
+		{"apiregistration.k8s.io", "apiservices", readOnly, true},
+		{"autoscaling.k8s.io", "verticalpodautoscalers", readOnly, true},
+		{"metrics.k8s.io", "pods", readOnly, true},
+		{"argoproj.io", "rollouts", readOnly, true},
+		{"karpenter.sh", "nodepools", readOnly, true},
+		{"storage.k8s.io", "csinodes", readOnly, true},
+		{"admissionregistration.k8s.io", "validatingadmissionpolicies", readOnly, true},
+		{"admissionregistration.k8s.io", "validatingadmissionpolicybindings", readOnly, true},
 	}
 }
 

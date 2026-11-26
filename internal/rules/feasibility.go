@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Shoalcheck/shoalcheck-scan/internal/collect"
 	"github.com/Shoalcheck/shoalcheck-scan/internal/types"
@@ -52,7 +54,7 @@ import (
 //	satisfies the predicates, and reports only when none does.
 //
 //	Preemption and autoscaling are named IN THE SENTENCE, not in a footnote. A higher-priority pod can
-//	evict a lower-priority one and take its place — `priorityclasses` is not collected and Pod.Spec.Priority
+//	evict a lower-priority one and take its place — the priorities are read, preemption is not decided, and Pod.Spec.Priority
 //	is read nowhere, so preemption is unmodelled. And an autoscaler can add nodes: the claim is about the
 //	EXISTING node set at the moment of the reading.
 //
@@ -78,12 +80,12 @@ var modelledPredicates = []string{
 // unmodelledPredicates is published beside it. The list is the claim's boundary, and a boundary a reader
 // cannot see is not one.
 var unmodelledPredicates = []string{
-	"preemption — a higher-priority pod can evict a lower-priority one and take its place; priorityclasses are not collected",
+	"preemption — a higher-priority pod can evict a lower-priority one and take its place; the pods' priorities are read, and whether the scheduler would preempt is not decided here",
 	"autoscaling — a node pool can add capacity; this reads the node set as it stands",
 	"inter-pod affinity and anti-affinity, which are order-dependent",
 	"topologySpread skew, which is computed against a domain set that changes as pods are placed",
 	"max pods per node, ephemeral-storage and extended resources such as GPUs",
-	"per-node volume attach limits (csinodes are not collected)",
+	"per-node volume attach limits (" + notRead("csinodes") + ")",
 	"two leaving pods that ask for the same host port, against each other",
 	"the scheduler's own configuration: which plugins, profiles or extenders are enabled",
 	"admission — the pod that would be created from a template is not the pod read here, because injectors add containers and requests",
@@ -120,6 +122,9 @@ type candidate struct {
 	freeMem resource.Quantity
 	// ports are the host ports the pods bound to it hold, nil when none do. Read-only, like the room.
 	ports map[hostPortKey]bool
+	// attachFree is, per CSI driver whose CSINode states a limit, how many more volumes the node can attach
+	// (ENG-44); nil when the reading holds no CSINode for it, and a driver absent from it has no stated limit.
+	attachFree map[string]int
 }
 
 // hostPortKey is a host port as the scheduler's NodePorts filter keys it: address, protocol and number, with an
@@ -200,9 +205,15 @@ func fits(c candidate, p corev1.Pod, cpu, mem resource.Quantity) bool {
 // Only the second is reported at node granularity.
 func admits(c candidate, p corev1.Pod) bool {
 	n := c.node
-	// nodeIsReady is rollout_preflight.go's, reused rather than reimplemented. A node with no Ready condition
-	// has not reported and is not eligible — the conservative direction, and one definition of it.
-	if n.Spec.Unschedulable || !nodeIsReady(n) {
+	// THROUGH THE TAINTS THE SCHEDULER SEES, NOT AROUND THEM (ENG-16). A cordoned node carries
+	// node.kubernetes.io/unschedulable:NoSchedule and a node that is not ready node.kubernetes.io/not-ready (or
+	// unreachable, when it has stopped reporting): the scheduler admits a pod that tolerates them, and a pod with
+	// a blanket toleration tolerates every taint. Refusing every such node for every pod made this model stricter
+	// than the scheduler, which is the one direction its soundness argument cannot afford.
+	if n.Spec.Unschedulable && !toleratesTaint(p, "node.kubernetes.io/unschedulable") {
+		return false
+	}
+	if !nodeIsReady(n) && !toleratesTaint(p, notReadyTaint(n)) {
 		return false
 	}
 	for k, v := range p.Spec.NodeSelector {
@@ -338,6 +349,16 @@ type displaced struct {
 	// it per node made this rule fire on TEN of the persona's twelve nodes — which is not a problem being
 	// reported, it is a cluster being described. A declaration is durable and names its own cause.
 	structural bool
+	// lower is what pods of a LOWER priority hold on the nodes that admit this one by every declaration and refuse
+	// it only on room (ENG-34, decision D5): stated as a fact, because the scheduler may preempt them. Whether it
+	// would is not decided here. Zero when the refusal is structural or the pod's priority is the lowest present.
+	lower lowerPriority
+}
+
+// lowerPriority is the room lower-priority pods hold on the admitting nodes.
+type lowerPriority struct {
+	pods     int
+	cpu, mem resource.Quantity
 }
 
 // scenario is a hypothetical loss: a set of nodes removed, and everything that ran on them.
@@ -373,6 +394,62 @@ type placementModel struct {
 	all     []int
 	byLabel map[string]map[string][]int
 	byName  map[string][]int
+	// csiDriver is each claim's CSI driver, keyed namespace/claim (ENG-44).
+	csiDriver map[string]string
+	// prio is each node's room held by its pods, grouped by priority ascending with running sums, built once on
+	// first use (ENG-34): only a reading with an unplaceable pod refused on room needs it.
+	prioOnce sync.Once
+	prio     map[string][]prioRoom
+}
+
+// prioRoom is what a node's pods of priority up to and including prio hold.
+type prioRoom struct {
+	prio     int32
+	pods     int
+	cpu, mem resource.Quantity
+}
+
+// lowerOn is the room pods of a priority strictly below prio hold on the node.
+func (m *placementModel) lowerOn(node string, prio int32) lowerPriority {
+	m.prioOnce.Do(func() {
+		m.prio = map[string][]prioRoom{}
+		for name, idx := range m.podsOn {
+			by := map[int32]*prioRoom{}
+			for _, j := range idx {
+				q := m.inv.Pods[j]
+				if !holdsRoom(q) {
+					continue
+				}
+				pr := podPriority(q)
+				b := by[pr]
+				if b == nil {
+					b = &prioRoom{prio: pr}
+					by[pr] = b
+				}
+				qc, qm := feasibilityRequests(q)
+				b.pods++
+				b.cpu.Add(qc)
+				b.mem.Add(qm)
+			}
+			rows := make([]prioRoom, 0, len(by))
+			for _, b := range by {
+				rows = append(rows, *b)
+			}
+			sort.Slice(rows, func(a, b int) bool { return rows[a].prio < rows[b].prio })
+			for k := 1; k < len(rows); k++ {
+				rows[k].pods += rows[k-1].pods
+				rows[k].cpu.Add(rows[k-1].cpu)
+				rows[k].mem.Add(rows[k-1].mem)
+			}
+			m.prio[name] = rows
+		}
+	})
+	rows := m.prio[node]
+	i := sort.Search(len(rows), func(i int) bool { return rows[i].prio >= prio })
+	if i == 0 {
+		return lowerPriority{}
+	}
+	return lowerPriority{pods: rows[i-1].pods, cpu: rows[i-1].cpu.DeepCopy(), mem: rows[i-1].mem.DeepCopy()}
 }
 
 func newPlacementModel(inv *collect.Inventory) *placementModel {
@@ -413,7 +490,98 @@ func newPlacementModel(inv *collect.Inventory) *placementModel {
 		}
 	}
 	m.volumes = boundVolumes(inv)
+	m.csiDriver = csiDrivers(inv)
+	// THE ATTACH LIMITS (ENG-44): each CSINode's per-driver allocatable count, less the CSI volumes the pods
+	// already on the node use. A node at its driver's limit refuses one more volume of that driver as surely as a
+	// full node refuses one more pod, and the scheduler's NodeVolumeLimits filter is what says so.
+	for _, o := range m.inv.StackObjects[gvrCSINodes] {
+		idx := byName[o.GetName()]
+		if len(idx) == 0 {
+			continue
+		}
+		drivers, _, _ := unstructured.NestedSlice(o.Object, "spec", "drivers")
+		for _, d := range drivers {
+			dm, ok := d.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _, _ := unstructured.NestedString(dm, "name")
+			count, ok, _ := unstructured.NestedInt64(dm, "allocatable", "count")
+			if !ok {
+				if f, okf, _ := unstructured.NestedFloat64(dm, "allocatable", "count"); okf {
+					count, ok = int64(f), true
+				}
+			}
+			if !ok || name == "" {
+				continue
+			}
+			for _, i := range idx {
+				if m.cands[i].attachFree == nil {
+					m.cands[i].attachFree = map[string]int{}
+				}
+				m.cands[i].attachFree[name] = int(count)
+			}
+		}
+	}
+	for j := range inv.Pods {
+		p := inv.Pods[j]
+		if !holdsRoom(p) {
+			continue
+		}
+		for drv, n := range m.attachNeeds(p) {
+			for _, i := range byName[p.Spec.NodeName] {
+				if _, limited := m.cands[i].attachFree[drv]; limited {
+					m.cands[i].attachFree[drv] -= n
+				}
+			}
+		}
+	}
 	return m
+}
+
+// csiDrivers is each claim's CSI driver, keyed namespace/claim, from the PersistentVolume it is bound to.
+func csiDrivers(inv *collect.Inventory) map[string]string {
+	pvs := map[string]string{}
+	for i := range inv.PVs {
+		if c := inv.PVs[i].Spec.CSI; c != nil {
+			pvs[inv.PVs[i].Name] = c.Driver
+		}
+	}
+	out := map[string]string{}
+	for i := range inv.PVCs {
+		c := &inv.PVCs[i]
+		if d := pvs[c.Spec.VolumeName]; d != "" {
+			out[c.Namespace+"/"+c.Name] = d
+		}
+	}
+	return out
+}
+
+// attachNeeds is how many volumes of each CSI driver the pod mounts through its claims.
+func (m *placementModel) attachNeeds(p corev1.Pod) map[string]int {
+	var out map[string]int
+	for _, v := range p.Spec.Volumes {
+		if v.PersistentVolumeClaim == nil {
+			continue
+		}
+		if d := m.csiDriver[p.Namespace+"/"+v.PersistentVolumeClaim.ClaimName]; d != "" {
+			if out == nil {
+				out = map[string]int{}
+			}
+			out[d]++
+		}
+	}
+	return out
+}
+
+// attachFits reports whether the node can attach the volumes the pod needs, by every driver limit it states.
+func attachFits(c candidate, need map[string]int) bool {
+	for d, n := range need {
+		if free, limited := c.attachFree[d]; limited && free < n {
+			return false
+		}
+	}
+	return true
 }
 
 // boundVolumes maps each claim, namespace/name, to the PersistentVolume bound to it when that volume carries a
@@ -560,7 +728,10 @@ func assess(m *placementModel, sc scenario, opts Options) (out []displaced, excl
 		}
 		cpu, mem := feasibilityRequests(p)
 		ports := hostPortsOf(p)
+		attach := m.attachNeeds(p)
 		placeable, structural := false, true
+		var lower lowerPriority
+		prio := podPriority(p)
 		// THE SURVIVORS IN PLACE, not a copy of them per scenario: copying every surviving node for each lost
 		// one was nodes² candidate copies, the one part of this model that still grew with the square of the
 		// cluster (4,000 nodes: 16 million).
@@ -580,6 +751,13 @@ func assess(m *placementModel, sc scenario, opts Options) (out []displaced, excl
 			if !portsFree(c.ports, ports) {
 				continue
 			}
+			// AN ATTACH LIMIT IS ROOM, NOT A DECLARATION: a volume detached elsewhere frees it tomorrow.
+			if !attachFits(c, attach) {
+				if admits(c, p) {
+					structural = false
+				}
+				continue
+			}
 			if fits(c, p, cpu, mem) {
 				placeable = true
 				break
@@ -591,8 +769,22 @@ func assess(m *placementModel, sc scenario, opts Options) (out []displaced, excl
 				structural = false
 			}
 		}
+		// A SECOND PASS, AND ONLY FOR THE FEW PODS THAT NEED IT: an unplaceable pod refused on room somewhere. Each
+		// admitting node's lower-priority room is one lookup in that node's running sums, not a walk of its pods.
+		if !placeable && !structural {
+			for _, i := range m.candidatesFor(p) {
+				c := m.cands[i]
+				if sc.removed[c.node.Name] || !volumesAdmit(pvs, c.node) || !portsFree(c.ports, ports) || !admits(c, p) {
+					continue
+				}
+				l := m.lowerOn(c.node.Name, prio)
+				lower.pods += l.pods
+				lower.cpu.Add(l.cpu)
+				lower.mem.Add(l.mem)
+			}
+		}
 		if !placeable {
-			out = append(out, displaced{pod: p, structural: structural})
+			out = append(out, displaced{pod: p, structural: structural, lower: lower})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -633,6 +825,11 @@ func (m *placementModel) leaving(sc scenario, opts Options, excludedScheduler *i
 		p := m.inv.Pods[i]
 		if p.Status.Phase != corev1.PodRunning && p.Status.Phase != corev1.PodPending {
 			continue // a Succeeded or Failed pod is not work that needs a home
+		}
+		// A POD BEING DELETED IS NOT WORK THAT NEEDS A HOME (ENG-16): it is leaving whatever happens to its node, and
+		// its controller's replacement is a new pod the scheduler places then. It still holds its room until it is gone.
+		if p.DeletionTimestamp != nil {
+			continue
 		}
 		// A DAEMONSET POD IS NOT DISPLACED WORK. Since Kubernetes 1.12 the DaemonSet controller schedules its
 		// pods by writing a required nodeAffinity of `metadata.name In [thatNode]` onto each one, so the
@@ -748,13 +945,16 @@ func (ZoneLossFeasibility) ID() string { return "k8s.reliability.zone-loss-feasi
 // 1.2.0 (2026-10-27): a bound volume's nodeAffinity is evaluated against each node's labels, whatever its key
 // (pvAdmits), both for immobility and for every candidate.
 // 1.3.0 (2026-10-28): a host port held on a candidate refuses a pod that asks for it (portsFree).
-func (ZoneLossFeasibility) Version() string { return "1.3.0" }
+// 1.4.0 (2026-11-16): the zone's work is checked in total too — the pigeonhole check NodeSetLoss makes (ENG-17).
+// 1.5.0 (2026-11-16): a cordoned or not-ready node admits a pod that tolerates its taint; a pod's runtime overhead
+// counts; a pod being deleted is not work looking for a home (ENG-16).
+func (ZoneLossFeasibility) Version() string { return "1.6.0" }
 
 // RequiredKinds gates the COMPARISON, not the run. All four are load-bearing: nodes and pods are what the
 // scenario is built from, and the volume pair is what the strongest claim in the family rests on — a reading
 // without PVs would report a pinned pod as merely unplaceable, which is a weaker and different statement.
 func (ZoneLossFeasibility) RequiredKinds() []string {
-	return []string{"nodes", "persistentvolumeclaims", "persistentvolumes", "pods"}
+	return sortedKinds([]string{"nodes", "persistentvolumeclaims", "persistentvolumes", "pods", crKind(gvrCSINodes)})
 }
 
 func (r ZoneLossFeasibility) Evaluate(inv *collect.Inventory, opts Options) []types.Finding {
@@ -795,27 +995,32 @@ func (r ZoneLossFeasibility) Evaluate(inv *collect.Inventory, opts Options) []ty
 	}
 	sort.Strings(zones)
 
-	m := newPlacementModel(inv)
+	m := derived(inv, opts).placementModel()
 	var out []types.Finding
 	for _, z := range zones {
 		removed := map[string]bool{}
 		for _, n := range byZone[z] {
 			removed[n] = true
 		}
-		lost, excluded := assess(m, scenario{kind: "zone", label: z, removed: removed}, opts)
-		if len(lost) == 0 && excluded == 0 {
-			continue
+		sc := scenario{kind: "zone", label: z, removed: removed}
+		lost, excluded := assess(m, sc, opts)
+		lostKey := map[string]bool{}
+		for _, d := range lost {
+			lostKey[d.pod.Namespace+"/"+d.pod.Name] = true
 		}
-		if len(lost) == 0 {
+		// EACH POD ALONE AND THE ZONE'S WORK TOGETHER (ENG-17). A pod with a home on its own can still have none
+		// when the whole zone's work arrives at once; the per-pod check said nothing about that.
+		a := aggregateRoom(m, sc, opts, lostKey)
+		if len(lost) == 0 && !a.short {
 			continue // nothing to report; the exclusion count rides on a finding, never alone
 		}
-		out = append(out, r.finding(inv, z, byZone[z], lost, excluded, len(inv.Nodes)))
+		out = append(out, r.finding(inv, z, byZone[z], lost, a, excluded, len(inv.Nodes)))
 	}
 	return out
 }
 
 func (r ZoneLossFeasibility) finding(inv *collect.Inventory, zone string, zoneNodes []string,
-	lost []displaced, excluded, totalNodes int) types.Finding {
+	lost []displaced, a roomAggregate, excluded, totalNodes int) types.Finding {
 
 	immobile := 0
 	for _, d := range lost {
@@ -830,6 +1035,22 @@ func (r ZoneLossFeasibility) finding(inv *collect.Inventory, zone string, zoneNo
 			zone, len(zoneNodes), nWord(totalNodes, "node", "nodes"), strings.Join(sortedCopy(zoneNodes), ", ")),
 	}
 	ev = append(ev, displacedEvidence(lost)...)
+	refs := displacedRefs(lost)
+	facts := []types.Fact{
+		types.NewFact("zone.name", zone), types.NewFact("zone.nodes", len(zoneNodes)),
+		types.NewFact("zone.pods.stranded", len(lost)), types.NewFact("zone.pods.moving", len(a.movers)),
+		types.NewFact("zone.ask.cpu", a.askCPU.MilliValue()), types.NewFact("zone.ask.memory", a.askMem.Value()),
+		types.NewFact("zone.free.cpu", a.roomCPU.MilliValue()), types.NewFact("zone.free.memory", a.roomMem.Value()),
+		types.NewFact("zone.short", a.short),
+	}
+	if len(a.movers) > 0 {
+		if a.short {
+			for _, p := range a.movers {
+				refs = append(refs, types.ResourceRef{Kind: "Pod", Namespace: p.Namespace, Name: p.Name})
+			}
+		}
+		ev = append(ev, zoneAggregateLine(facts))
+	}
 	if immobile > 0 {
 		ev = append(ev, fmt.Sprintf("%d of them hold a PersistentVolume whose own nodeAffinity names this zone, "+
 			"so they could not move within the reading at all — that is arithmetic over the volume object, not "+
@@ -849,27 +1070,73 @@ func (r ZoneLossFeasibility) finding(inv *collect.Inventory, zone string, zoneNo
 		ClaimBoundaries: zoneLabelBoundaries(inv),
 		RuleID:          r.ID(),
 		RuleVersion:     r.Version(),
-		Title: fmt.Sprintf("Losing zone %s leaves %s with no node this model accepts",
-			zone, nWord(len(lost), "pod", "pods")),
-		Description: fmt.Sprintf("If every node in zone %s were unavailable, %s running there would have "+
-			"no remaining node in this reading that satisfies the constraints this model checks. The model checks "+
-			"a subset of what the Kubernetes scheduler checks, which is why it can report that nothing satisfies "+
-			"it and cannot report the opposite: preemption could free room the model does not see, and an "+
+		Title:           zoneTitle(zone, len(lost), a),
+		Description: zoneFirst(zone, len(lost), a) + " The model checks " +
+			"a subset of what the Kubernetes scheduler checks, which is why it can report that nothing satisfies " +
+			"it and cannot report the opposite: preemption could free room the model does not see, and an " +
 			"autoscaler could add nodes this reading does not contain.",
-			zone, nWord(len(lost), "pod", "pods")),
 		WhyItMatters: "A zone becoming unavailable is a routine cloud event, and the pods listed here are the ones " +
 			"whose declared constraints leave them nothing to fall back to in the node set as it stands. The " +
 			"pinned ones are the sharper case: a volume that names a zone cannot follow its pod out of it.",
 		Evidence:          ev,
 		Severity:          types.SeverityHigh,
 		Category:          types.CategoryReliability,
-		AffectedResources: displacedRefs(lost),
+		AffectedResources: refs,
+		Facts:             facts,
 		EstimatedEffort:   types.EffortHigh,
 		// 1.0 for the immobility half and for the arithmetic; the model's partiality is a claim boundary
 		// published in the finding, not an uncertainty about what was observed.
 		Confidence: 1.0,
 		Provenance: provenance(),
 	}
+}
+
+// zoneAggregateLine is the aggregate's sentence, rendered from the facts (M-172). Quantities are written back the
+// way the scheduler's own types print them: CPU from millicores, memory from bytes.
+func zoneAggregateLine(fs []types.Fact) string {
+	cpu := func(k string) string {
+		return resource.NewMilliQuantity(int64(types.FactNum(fs, k)), resource.DecimalSI).String()
+	}
+	mem := func(k string) string {
+		return resource.NewQuantity(int64(types.FactNum(fs, k)), resource.BinarySI).String()
+	}
+	verdict := "the larger fits in the smaller in total, which does not establish that it fits in pieces"
+	if v, _ := types.FactValue(fs, "zone.short"); v == true {
+		verdict = "no order of placement makes the larger fit in the smaller"
+	}
+	return fmt.Sprintf("the zone's work that has a candidate node pod by pod — %s — asks %s cpu and %s memory "+
+		"in total; the surviving nodes that admit any of it hold %s cpu and %s memory free between them — %s",
+		nWord(int(types.FactNum(fs, "zone.pods.moving")), "pod", "pods"), cpu("zone.ask.cpu"), mem("zone.ask.memory"),
+		cpu("zone.free.cpu"), mem("zone.free.memory"), verdict)
+}
+
+// zoneTitle and zoneFirst say the zone finding's claim: the pods with no node one by one, the zone's work that does
+// not fit in total, or both.
+func zoneTitle(zone string, lost int, a roomAggregate) string {
+	if lost > 0 {
+		return fmt.Sprintf("Losing zone %s leaves %s with no node this model accepts", zone, nWord(lost, "pod", "pods"))
+	}
+	return fmt.Sprintf("Losing zone %s asks for more room than the remaining zones have free", zone)
+}
+
+func zoneFirst(zone string, lost int, a roomAggregate) string {
+	s := ""
+	if lost > 0 {
+		s = fmt.Sprintf("If every node in zone %s were unavailable, %s running there would have no remaining node in "+
+			"this reading that satisfies the constraints this model checks.", zone, nWord(lost, "pod", "pods"))
+	}
+	if a.short {
+		if s != "" {
+			s += " "
+		}
+		s += fmt.Sprintf("The %s of zone %s that each have a candidate node on their own request more cpu or memory in "+
+			"total than the remaining nodes that accept them have free.", nWord(len(a.movers), "other pod", "other pods"), zone)
+		if lost == 0 {
+			s = fmt.Sprintf("If every node in zone %s were unavailable, the %s running there would request more cpu or "+
+				"memory in total than the remaining nodes that accept them have free.", zone, nWord(len(a.movers), "pod", "pods"))
+		}
+	}
+	return s
 }
 
 func (r ZoneLossFeasibility) unzonedAbstention(inv *collect.Inventory) types.Finding {
@@ -895,6 +1162,7 @@ func (r ZoneLossFeasibility) unzonedAbstention(inv *collect.Inventory) types.Fin
 		AffectedResources: []types.ResourceRef{{Kind: "Cluster"}},
 		EstimatedEffort:   types.EffortLow,
 		Confidence:        0.0,
+		Abstention:        true,
 		Provenance:        provenance(),
 	}
 }
@@ -926,6 +1194,7 @@ func (r ZoneLossFeasibility) singleZoneAbstention(inv *collect.Inventory, byZone
 		AffectedResources: []types.ResourceRef{{Kind: "Cluster"}},
 		EstimatedEffort:   types.EffortLow,
 		Confidence:        0.0,
+		Abstention:        true,
 		Provenance:        provenance(),
 	}
 }
@@ -945,10 +1214,11 @@ func (NodeLossFeasibility) ID() string { return "k8s.reliability.node-loss-feasi
 // 1.2.0 (2026-10-27): a bound volume's nodeAffinity is evaluated against each node's labels, whatever its key
 // (pvAdmits), both for immobility and for every candidate.
 // 1.3.0 (2026-10-28): a host port held on a candidate refuses a pod that asks for it (portsFree).
-func (NodeLossFeasibility) Version() string { return "1.3.0" }
+// 1.4.0 (2026-11-16): the scheduler's taints for a cordoned or not-ready node, runtime overhead, deleting pods (ENG-16).
+func (NodeLossFeasibility) Version() string { return "1.5.0" }
 
 func (NodeLossFeasibility) RequiredKinds() []string {
-	return []string{"nodes", "persistentvolumeclaims", "persistentvolumes", "pods"}
+	return sortedKinds([]string{"nodes", "persistentvolumeclaims", "persistentvolumes", "pods", crKind(gvrCSINodes)})
 }
 
 func (r NodeLossFeasibility) Evaluate(inv *collect.Inventory, opts Options) []types.Finding {
@@ -967,7 +1237,7 @@ func (r NodeLossFeasibility) Evaluate(inv *collect.Inventory, opts Options) []ty
 	}
 	sort.Strings(names)
 
-	m := newPlacementModel(inv)
+	m := derived(inv, opts).placementModel()
 	var out []types.Finding
 	for _, name := range names {
 		lost, excluded := assess(m, scenario{kind: "node", label: name, removed: map[string]bool{name: true}}, opts)
@@ -1074,7 +1344,7 @@ func NodeSetLoss(inv *collect.Inventory, nodes []string, opts Options) []types.F
 		removed[n] = true
 	}
 	sc := scenario{kind: "node", label: strings.Join(names, ", "), removed: removed}
-	m := newPlacementModel(inv)
+	m := derived(inv, opts).placementModel()
 	lost, excluded := assess(m, sc, opts)
 
 	// What each node's own scenario already strands by a declaration, by pod. Left to that node's finding.
@@ -1097,23 +1367,38 @@ func NodeSetLoss(inv *collect.Inventory, nodes []string, opts Options) []types.F
 		}
 	}
 
-	// THE AGGREGATE, over the pods that each found a home on their own.
+	a := aggregateRoom(m, sc, opts, lostKey)
+	if len(stranded) == 0 && !a.short {
+		return nil
+	}
+	return []types.Finding{nodeSetFinding(inv, names, stranded, a.movers, a.short, a.askCPU, a.askMem, a.roomCPU, a.roomMem, excluded)}
+}
+
+// roomAggregate is the pigeonhole check over the pods that each found a home on their own: what they request in
+// total, against what every surviving node that admits any of them has free. When the request is larger, no
+// packing finds room, whatever order a scheduler tries; fitting in total is never claimed as fitting in pieces.
+type roomAggregate struct {
+	movers                           []corev1.Pod
+	askCPU, askMem, roomCPU, roomMem resource.Quantity
+	short                            bool
+}
+
+// aggregateRoom computes it for a scenario, leaving out the pods in skip (those already stranded one by one).
+func aggregateRoom(m *placementModel, sc scenario, opts Options, skip map[string]bool) roomAggregate {
+	var a roomAggregate
 	var ignore int
-	var movers []corev1.Pod
-	var askCPU, askMem resource.Quantity
 	for _, p := range m.leaving(sc, opts, &ignore) {
-		if lostKey[p.Namespace+"/"+p.Name] {
+		if skip[p.Namespace+"/"+p.Name] {
 			continue
 		}
 		cpu, mem := feasibilityRequests(p)
-		askCPU.Add(cpu)
-		askMem.Add(mem)
-		movers = append(movers, p)
+		a.askCPU.Add(cpu)
+		a.askMem.Add(mem)
+		a.movers = append(a.movers, p)
 	}
-	var roomCPU, roomMem resource.Quantity
 	for _, c := range m.survivors(sc) {
 		admitsAny := false
-		for _, p := range movers {
+		for _, p := range a.movers {
 			if admits(c, p) && volumesAdmit(m.volumesOf(p), c.node) && portsFree(c.ports, hostPortsOf(p)) {
 				admitsAny = true
 				break
@@ -1123,18 +1408,14 @@ func NodeSetLoss(inv *collect.Inventory, nodes []string, opts Options) []types.F
 			continue
 		}
 		if c.freeCPU.Sign() > 0 {
-			roomCPU.Add(c.freeCPU)
+			a.roomCPU.Add(c.freeCPU)
 		}
 		if c.freeMem.Sign() > 0 {
-			roomMem.Add(c.freeMem)
+			a.roomMem.Add(c.freeMem)
 		}
 	}
-	short := len(movers) > 0 && (askCPU.Cmp(roomCPU) > 0 || askMem.Cmp(roomMem) > 0)
-
-	if len(stranded) == 0 && !short {
-		return nil
-	}
-	return []types.Finding{nodeSetFinding(inv, names, stranded, movers, short, askCPU, askMem, roomCPU, roomMem, excluded)}
+	a.short = len(a.movers) > 0 && (a.askCPU.Cmp(a.roomCPU) > 0 || a.askMem.Cmp(a.roomMem) > 0)
+	return a
 }
 
 func nodeSetFinding(inv *collect.Inventory, names []string, stranded []displaced, movers []corev1.Pod, short bool,
@@ -1352,6 +1633,9 @@ func displacedEvidence(lost []displaced) []string {
 		}
 		ev = append(ev, fmt.Sprintf("%s/%s requests %s cpu and %s memory%s; no surviving node in this reading "+
 			"satisfies the modelled constraints", d.pod.Namespace, d.pod.Name, cpu.String(), mem.String(), asks))
+		if line := lowerPriorityLine(d); line != "" {
+			ev = append(ev, line)
+		}
 	}
 	if len(lost) > len(shown) {
 		ev = append(ev, fmt.Sprintf("%s in the same position not listed here",
@@ -1402,4 +1686,49 @@ func zoneLabelBoundaries(inv *collect.Inventory) []string {
 	return []string{fmt.Sprintf("%d of the nodes in this reading carry only the retired %s label while %d "+
 		"carry the current one, so the failure domains are assembled from two keys that a provider is not "+
 		"required to keep in agreement.", beta, collect.GAZoneLabel, ga)}
+}
+
+// toleratesTaint reports whether the pod tolerates a NoSchedule taint with this key, by the API's own matching.
+func toleratesTaint(p corev1.Pod, key string) bool {
+	taint := corev1.Taint{Key: key, Effect: corev1.TaintEffectNoSchedule}
+	for i := range p.Spec.Tolerations {
+		if p.Spec.Tolerations[i].ToleratesTaint(&taint) {
+			return true
+		}
+	}
+	return false
+}
+
+// notReadyTaint is the taint the node lifecycle controller puts on a node that is not ready: not-ready when its
+// Ready condition says False, unreachable when it says Unknown or the node has not reported at all.
+func notReadyTaint(n *corev1.Node) string {
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady && c.Status == corev1.ConditionFalse {
+			return "node.kubernetes.io/not-ready"
+		}
+	}
+	return "node.kubernetes.io/unreachable"
+}
+
+// podPriority is the pod's resolved priority (spec.priority, written by admission from its PriorityClass); 0 when
+// unset, as the scheduler treats it.
+func podPriority(p corev1.Pod) int32 {
+	if p.Spec.Priority != nil {
+		return *p.Spec.Priority
+	}
+	return 0
+}
+
+// lowerPriorityLine is decision D5's sentence: the facts, and that this model does not decide the scheduler's call.
+func lowerPriorityLine(d displaced) string {
+	if d.lower.pods == 0 {
+		return ""
+	}
+	verb, them := "hold", "them"
+	if d.lower.pods == 1 {
+		verb, them = "holds", "it"
+	}
+	return fmt.Sprintf("%s/%s: %s of lower priority %s %s cpu and %s memory on the nodes that admit it by every "+
+		"declaration and refuse it only on room; the scheduler may preempt %s, and this model does not decide whether it would",
+		d.pod.Namespace, d.pod.Name, nWord(d.lower.pods, "pod", "pods"), verb, d.lower.cpu.String(), d.lower.mem.String(), them)
 }

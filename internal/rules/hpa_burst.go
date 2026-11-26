@@ -144,6 +144,7 @@ func (r HPABurstExceedsAllocatable) Evaluate(inv *collect.Inventory, opts Option
 			"capacity are all outside this reading — the comparison is against the CURRENT node set")
 
 	return []types.Finding{{
+		Facts:       []types.Fact{types.NewFact("burst.autoscalers", len(lines)), types.NewFact("burst.autoscalers.excluded", unknown), types.NewFact("burst.ask.cpu", burstCPU), types.NewFact("burst.ask.memory", burstMem), types.NewFact("burst.free.cpu", freeCPU), types.NewFact("burst.free.memory", freeMem)},
 		ID:          findingID(r.ID(), "Cluster", "", "hpa-burst"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "hpa-burst"},
 		RuleID:      r.ID(),

@@ -303,11 +303,10 @@ const negationWindow = 90
 
 // Negated reports whether the hit at index i sits inside a negating construction.
 //
-// A NEGATOR MUST BE A WORD. This used to be strings.Contains, and the negator list holds "no " and "nor " —
-// so any word ending in "no" or "nor" followed by a space licensed every banned term for the next 90
-// characters. "mono " contains "no "; "minor " contains "nor ". Neither is hypothetical in this product:
-// --font-mono is written out in the stylesheet the report embeds, and "mono" appears in prose about tabular
-// figures. `Scan("the mono column is clean")` returned no violation at all.
+// A NEGATOR MUST BE A WORD. The negator list holds "no " and "nor ", so a substring match (strings.Contains) would let
+// any word ending in "no" or "nor" followed by a space license every banned term for the next 90 characters: "mono "
+// contains "no "; "minor " contains "nor ". Neither is hypothetical in this product — --font-mono is written out in
+// the stylesheet the report embeds, and "mono" appears in prose about tabular figures.
 //
 // The direction of the failure is what makes it serious. A false ALLOW is silent — the gate reports a clean
 // document — and the enforcement point this package is about to gain runs on real output, where a false allow

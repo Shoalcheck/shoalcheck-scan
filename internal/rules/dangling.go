@@ -95,6 +95,7 @@ func (r DanglingServiceAccount) Evaluate(inv *collect.Inventory, opts Options) [
 			continue
 		}
 		out = append(out, types.Finding{
+			Facts:       []types.Fact{types.NewFact("dangling.read", countSAsIn(inv, w.Namespace)), types.NewFact("dangling.target", name)},
 			ID:          findingID(r.ID(), w.Kind, w.Namespace, w.Name),
 			IDBasis:     &types.ResourceRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name},
 			RuleID:      r.ID(),
@@ -212,6 +213,7 @@ func (r DanglingRoleRef) finding(inv *collect.Inventory, kind, ns, name, target 
 		where = fmt.Sprintf("%s %s/%s", kind, ns, name)
 	}
 	return types.Finding{
+		Facts:       []types.Fact{types.NewFact("dangling.read.clusterroles", len(inv.ClusterRoles)), types.NewFact("dangling.read.roles", len(inv.Roles)), types.NewFact("dangling.target", target)},
 		ID:          findingID(r.ID(), kind, ns, name),
 		IDBasis:     &types.ResourceRef{Kind: kind, Namespace: ns, Name: name},
 		RuleID:      r.ID(),
@@ -319,6 +321,7 @@ func (r DanglingScaleTarget) Evaluate(inv *collect.Inventory, opts Options) []ty
 
 func (r DanglingScaleTarget) finding(inv *collect.Inventory, ns, name, kind, target string, pool int) types.Finding {
 	return types.Finding{
+		Facts:       []types.Fact{types.NewFact("dangling.read", pool), types.NewFact("dangling.target", target)},
 		ID:          findingID(r.ID(), "HorizontalPodAutoscaler", ns, name),
 		IDBasis:     &types.ResourceRef{Kind: "HorizontalPodAutoscaler", Namespace: ns, Name: name},
 		RuleID:      r.ID(),
@@ -361,6 +364,7 @@ func (r DanglingScaleTarget) exclusionNote(inv *collect.Inventory, uncollected m
 		total += uncollected[k]
 	}
 	return types.Finding{
+		Facts:       []types.Fact{types.NewFact("dangling.unassessed", total)},
 		ID:          findingID(r.ID(), "Cluster", "", "uncollected-target-kinds"),
 		IDBasis:     &types.ResourceRef{Kind: "Cluster", Namespace: "", Name: "uncollected-target-kinds"},
 		RuleID:      r.ID(),

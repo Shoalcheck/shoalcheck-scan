@@ -57,10 +57,8 @@ type SourceURL string
 //
 //	-ldflags "-X shoalcheck/internal/refdata.bundleSource=https://…/latest.bundle"
 //
-// EMPTY BY DEFAULT, AND THAT IS A CORRECTION RATHER THAN A GAP. It used to be a compiled-in constant naming
-// `data.assay.sh`, described in this file as "where the vendor publishes the current signed bundle" — and
-// **assay.sh is not this project's domain.** Measured 2026-09-11: it 308s to www.assay.sh, which serves a
-// live product called "Assay — Agentic Code Reviews", with its own pricing and sign-in; `data.assay.sh`
+// EMPTY BY DEFAULT, AND THAT IS A CORRECTION RATHER THAN A GAP. No address is compiled in, because the one that was
+// named a domain that is not this project's: assay.sh serves a live third-party product.
 // answers 404 from that party's Vercel deployment.
 //
 // So a release build carrying a bundle-verification key would have issued a GET to a third party's server
